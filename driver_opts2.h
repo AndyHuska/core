@@ -73,10 +73,12 @@
 #define CONTROL_ENABLE 0
 #endif
 
+#ifndef FLASH_ENABLE
 #if EEPROM_ENABLE == 0
 #define FLASH_ENABLE 1
 #else
 #define FLASH_ENABLE 0
+#endif
 #endif
 
 #ifndef SDCARD_SDIO

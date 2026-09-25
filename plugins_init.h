@@ -208,6 +208,16 @@
     pwm_servo_init();
 #endif
 
+#if H743_MOSFET_PWM_ENABLE
+    extern void h743_mosfet_pwm_init (void);
+    h743_mosfet_pwm_init();
+#endif
+
+#if VELOCITY_JOG_ENABLE
+    extern void direct_motion_init (void);
+    direct_motion_init();
+#endif
+
 #if BLTOUCH_ENABLE
     extern void bltouch_init (void);
     bltouch_init();

@@ -611,11 +611,7 @@ FLASHMEM static status_code_t set_axis_mask (setting_id_t id, uint_fast16_t valu
             break;
 
         case Setting_LimitPinsInvertMask:
-#if COMPATIBILITY_LEVEL > 1
-            settings.limits.invert.mask = value ? (~DEFAULT_LIMIT_SIGNALS_INVERT_MASK & AXES_BITMASK) : DEFAULT_LIMIT_SIGNALS_INVERT_MASK;
-#else
             settings.limits.invert.mask = value;
-#endif
             break;
 
         case Setting_LimitPullUpDisableMask:
@@ -690,11 +686,7 @@ FLASHMEM static uint32_t get_axis_mask (setting_id_t id, uint_fast16_t int_value
             break;
 
         case Setting_LimitPinsInvertMask:
-#if COMPATIBILITY_LEVEL > 1
-            value = settings.limits.invert.mask == DEFAULT_LIMIT_SIGNALS_INVERT_MASK ? 0 : 1;
-#else
             value = settings.limits.invert.mask;
-#endif
             break;
 
         case Setting_LimitPullUpDisableMask:
@@ -2288,11 +2280,7 @@ PROGMEM static const setting_detail_t setting_detail[] = {
 #else
      { Setting_InvertStepperEnable, Group_Stepper, "Invert stepper enable output", NULL, Format_Bool, NULL, NULL, NULL, Setting_IsLegacyFn, set_axis_mask, get_axis_mask, NULL },
 #endif
-#if COMPATIBILITY_LEVEL <= 1
-     { Setting_LimitPinsInvertMask, Group_Limits, "Invert limit inputs", NULL, Format_AxisMask, NULL, NULL, NULL, Setting_IsLegacyFn, set_axis_mask, get_axis_mask, NULL },
-#else
-     { Setting_LimitPinsInvertMask, Group_Limits, "Invert limit inputs", NULL, Format_Bool, NULL, NULL, NULL, Setting_IsLegacyFn, set_axis_mask, get_axis_mask, NULL },
-#endif
+    { Setting_LimitPinsInvertMask, Group_Limits, "Invert limit inputs", NULL, Format_AxisMask, NULL, NULL, NULL, Setting_IsLegacyFn, set_axis_mask, get_axis_mask, NULL },
      { Setting_InvertProbePin, Group_Probing, "Invert probe inputs", NULL, Format_Bitfield, probe_signals, NULL, NULL, Setting_IsLegacyFn, set_probe_invert, get_int, is_setting_available },
      { Setting_SpindlePWMBehaviour, Group_Spindle, "Deprecated", NULL, Format_Bool, NULL, NULL, NULL, Setting_IsLegacyFn, set_pwm_mode, get_int, is_setting_available },
      { Setting_GangedDirInvertMask, Group_Stepper, "Ganged axes direction invert", NULL, Format_Bitfield, ganged_axes, NULL, NULL, Setting_IsExtendedFn, set_ganged_dir_invert, get_int, is_setting_available },
