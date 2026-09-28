@@ -29,6 +29,10 @@
 #include "protocol.h"
 #include "state_machine.h"
 
+#if VELOCITY_JOG_ENABLE
+#include "../plugins/direct_motion.h"
+#endif
+
 //#define MINIMIZE_PROBE_OVERSHOOT
 
 //#include "debug.h"
@@ -85,6 +89,9 @@ static volatile bool exec_fast_hold = false;
 
 // Stepper timer ticks per minute
 static float cycles_per_min;
+#if REPORT_REALTIME_AXIS_VELOCITY
+static float realtime_axis_rate[N_AXIS] = {0.0f};
+#endif
 
 // Step segment ring buffer pointers
 static volatile segment_t *segment_buffer_tail, *segment_buffer_head;
@@ -129,6 +136,52 @@ DCRAM static struct {
     float inv_feedrate;     // Used by PWM laser mode to speed up segment calculations.
     float current_spindle_rpm;
 } prep;
+
+#if REPORT_REALTIME_AXIS_VELOCITY
+static void st_clear_realtime_axis_rates (void)
+{
+    uint_fast8_t idx = N_AXIS;
+    do {
+        realtime_axis_rate[--idx] = 0.0f;
+    } while(idx);
+}
+
+// Update per-axis commanded rates from currently executing segment/block.
+// Uses step-event rate math (not path-length normalization), which naturally
+// handles mixed linear/rotary moves.
+static void st_update_realtime_axis_rates (const segment_t *segment, const st_block_t *block)
+{
+    if(segment == NULL || block == NULL || block->step_event_count == 0 || segment->cycles_per_tick == 0) {
+        st_clear_realtime_axis_rates();
+        return;
+    }
+
+    float step_events_per_min = cycles_per_min / (float)segment->cycles_per_tick;
+
+#if ADAPTIVE_MULTI_AXIS_STEP_SMOOTHING
+    step_events_per_min /= (float)(1u << segment->amass_level);
+#endif
+
+    uint_fast8_t idx = N_AXIS;
+    do {
+        idx--;
+
+        float steps_per_unit = settings.axis[idx].steps_per_mm;
+        if(steps_per_unit <= 0.0f || block->steps.value[idx] == 0) {
+            realtime_axis_rate[idx] = 0.0f;
+            continue;
+        }
+
+        float axis_step_rate = step_events_per_min * ((float)block->steps.value[idx] / (float)block->step_event_count);
+        float axis_units_per_min = axis_step_rate / steps_per_unit;
+
+        if(block->direction.mask & bit(idx))
+            axis_units_per_min = -axis_units_per_min;
+
+        realtime_axis_rate[idx] = axis_units_per_min;
+    } while(idx);
+}
+#endif
 
 //! \endcond
 
@@ -260,6 +313,9 @@ ISR_CODE void ISR_FUNC(st_go_idle)(void)
     sys_state_t state = state_get();
 
     stepping = false;
+#if REPORT_REALTIME_AXIS_VELOCITY
+    st_clear_realtime_axis_rates();
+#endif
     hal.stepper.go_idle(false);
 
     task_delete(plan_sync_velocity, NULL);
@@ -568,12 +624,16 @@ ISR_CODE void ISR_FUNC(stepper_driver_interrupt_handler)(void)
                 st.exec_segment->update_pwm(st.exec_block->spindle, st.exec_segment->spindle_pwm);
             else if(st.exec_segment->update_rpm)
                 st.exec_segment->update_rpm(st.exec_block->spindle, st.exec_segment->spindle_rpm);
+
+#if REPORT_REALTIME_AXIS_VELOCITY
+            st_update_realtime_axis_rates(st.exec_segment, st.exec_block);
+#endif
         } else {
             // Segment buffer empty. Shutdown.
             st_go_idle();
 
             // Ensure pwm is set properly upon completion of rate-controlled motion.
-            if(st.exec_block->dynamic_rpm && st.exec_block->spindle->cap.laser) {
+            if(st.exec_block && st.exec_block->dynamic_rpm && st.exec_block->spindle->cap.laser) {
                 prep.current_spindle_rpm = 0.0f;
                 st.exec_block->spindle->update_pwm(st.exec_block->spindle, st.exec_block->spindle->pwm_off_value);
             }
@@ -759,6 +819,9 @@ FLASHMEM void st_reset (void)
 
     memset(&prep, 0, sizeof(prep));
     memset(&st, 0, sizeof(stepper_t));
+#if REPORT_REALTIME_AXIS_VELOCITY
+    st_clear_realtime_axis_rates();
+#endif
 
 #if ADAPTIVE_MULTI_AXIS_STEP_SMOOTHING
     // TODO: move to driver?
@@ -1461,6 +1524,28 @@ float st_get_realtime_rate (void)
 #endif
             : 0.0f;
 }
+
+#if REPORT_REALTIME_AXIS_VELOCITY
+void st_get_realtime_axis_rates (float *rates)
+{
+    if(rates == NULL)
+        return;
+
+#if VELOCITY_JOG_ENABLE
+    if(direct_motion_get_realtime_axis_rates(rates))
+        return;
+#endif
+
+    if(state_get() & (STATE_CYCLE|STATE_HOMING|STATE_HOLD|STATE_JOG|STATE_SAFETY_DOOR)) {
+        memcpy(rates, realtime_axis_rate, sizeof(realtime_axis_rate));
+    } else {
+        uint_fast8_t idx = N_AXIS;
+        do {
+            rates[--idx] = 0.0f;
+        } while(idx);
+    }
+}
+#endif
 
 offset_id_t st_get_offset_id (void)
 {

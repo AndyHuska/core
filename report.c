@@ -1192,6 +1192,9 @@ void report_realtime_status (stream_write_ptr stream_write, status_report_tracki
     uint_fast8_t idx;
     bool gcode_mode_changed = false;
     float print_position[N_AXIS], wco[N_AXIS], dist_remaining[N_AXIS];
+#if REPORT_REALTIME_AXIS_VELOCITY
+    float axis_rates[N_AXIS] = {0.0f};
+#endif
     report_tracking_flags_t delayed_report = {0};
     probe_state_t probe_state = {
         .connected = On,
@@ -1324,6 +1327,16 @@ void report_realtime_status (stream_write_ptr stream_write, status_report_tracki
         } else
             stream_write(appendbuf(2, "|F:", get_rate_value(st_get_realtime_rate())));
     }
+
+#if REPORT_REALTIME_AXIS_VELOCITY
+    st_get_realtime_axis_rates(axis_rates);
+    stream_write("|AV:");
+    for(idx = 0; idx < system_n_axis(); idx++) {
+        stream_write(ftoa(axis_rates[idx], 1));
+        if(idx < (system_n_axis() - 1))
+            stream_write(",");
+    }
+#endif
 
 #if N_SYS_SPINDLE > 1
 

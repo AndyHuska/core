@@ -153,6 +153,12 @@ void st_update_plan_block_parameters (bool fast_hold);
 // Called by realtime status reporting if realtime rate reporting is enabled in config.h.
 float st_get_realtime_rate (void);
 
+#if REPORT_REALTIME_AXIS_VELOCITY
+// Called by realtime status reporting to fetch per-axis commanded rates.
+// Rates are returned in machine units/minute for each configured axis.
+void st_get_realtime_axis_rates (float *rates);
+#endif
+
 void stepper_driver_interrupt_handler (void);
 
 offset_id_t st_get_offset_id (void);

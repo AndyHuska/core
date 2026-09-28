@@ -748,6 +748,20 @@ If set to \ref Off or 0 the `|DTG:` distance-to-go element is not included in th
 #define DEFAULT_REPORT_DISTANCE_TO_GO Off // Default off. Set to \ref On or 1 to enable.
 #endif
 
+/*! \def REPORT_REALTIME_AXIS_VELOCITY
+Enable reporting per-axis realtime commanded velocity vector in status reports as `|AV:`.
+
+This is a custom extension. Enabled by default for Waveshare OpenH743I builds,
+disabled by default for other board builds.
+*/
+#if !defined REPORT_REALTIME_AXIS_VELOCITY || defined __DOXYGEN__
+  #if defined(BOARD_WAVESHARE_OPENH743I)
+    #define REPORT_REALTIME_AXIS_VELOCITY On
+  #else
+    #define REPORT_REALTIME_AXIS_VELOCITY Off
+  #endif
+#endif
+
 ///@}
 
 /*! @name $11 - Setting_JunctionDeviation
