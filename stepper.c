@@ -55,6 +55,30 @@ typedef union {
 } prep_flags_t;
 
 static bool stepping = false;
+#define EXECUTION_QUEUE_SIZE 16
+#define EXECUTION_LEDGER_SIZE 1024
+
+typedef struct {
+    line_number_t id;
+    uint16_t expected;
+    uint16_t completed;
+    bool open;
+} execution_entry_t;
+
+static execution_entry_t execution_ledger[EXECUTION_LEDGER_SIZE];
+static uint_fast8_t execution_ledger_count = 0;
+static line_number_t execution_queue[EXECUTION_QUEUE_SIZE];
+static volatile uint_fast8_t execution_queue_head = 0;
+static volatile uint_fast8_t execution_queue_tail = 0;
+static volatile uint_fast8_t execution_queue_count = 0;
+static volatile line_number_t active_execution_id = 0;
+static line_number_t last_completed_execution_id = 0;
+static volatile bool execution_overflow = false;
+static bool execution_overflow_reported = false;
+static output_command_t *output_free_queue[SEGMENT_BUFFER_SIZE];
+static volatile uint_fast16_t output_free_head = 0;
+static volatile uint_fast16_t output_free_tail = 0;
+static volatile uint_fast16_t output_free_count = 0;
 
 // Holds the planner block Bresenham algorithm execution data for the segments in the segment
 // buffer. Normally, this buffer is partially in-use, but, for the worst case scenario, it will
@@ -89,6 +113,251 @@ static volatile bool exec_fast_hold = false;
 
 // Stepper timer ticks per minute
 static float cycles_per_min;
+
+static execution_entry_t *execution_find (line_number_t id)
+{
+    uint_fast8_t idx;
+
+    for(idx = 0; idx < execution_ledger_count; idx++) {
+        if(execution_ledger[idx].id == id)
+            return &execution_ledger[idx];
+    }
+
+    return NULL;
+}
+
+static execution_entry_t *execution_add (line_number_t id)
+{
+    execution_entry_t *entry = execution_find(id);
+
+    if(entry)
+        return entry;
+
+    if(id && execution_ledger_count < EXECUTION_LEDGER_SIZE) {
+        entry = &execution_ledger[execution_ledger_count++];
+        *entry = (execution_entry_t){ .id = id, .open = true };
+        return entry;
+    }
+
+    if(id)
+        execution_overflow = true;
+
+    return NULL;
+}
+
+static void execution_remove (uint_fast8_t idx)
+{
+    if(idx + 1 < execution_ledger_count)
+        memmove(&execution_ledger[idx], &execution_ledger[idx + 1], (execution_ledger_count - idx - 1) * sizeof(execution_entry_t));
+    execution_ledger_count--;
+}
+
+static void execution_emit (const char *prefix, line_number_t id)
+{
+    hal.stream.write_all(prefix);
+    hal.stream.write(uitoa(id));
+    hal.stream.write_all("]" ASCII_EOL);
+}
+
+static void execution_queue_push (line_number_t id)
+{
+    if(!id)
+        return;
+
+    if(execution_queue_count == EXECUTION_QUEUE_SIZE) {
+        execution_overflow = true;
+        return;
+    }
+
+    execution_queue[execution_queue_head] = id;
+    execution_queue_head = (execution_queue_head + 1) % EXECUTION_QUEUE_SIZE;
+    execution_queue_count++;
+}
+
+static bool output_free_push_isr (output_command_t *commands)
+{
+    if(!commands)
+        return true;
+
+    if(output_free_count < SEGMENT_BUFFER_SIZE) {
+        output_free_queue[output_free_head] = commands;
+        output_free_head = (output_free_head + 1) % SEGMENT_BUFFER_SIZE;
+        output_free_count++;
+        return true;
+    } else if(commands)
+        execution_overflow = true;
+
+    return false;
+}
+
+void st_execution_begin (line_number_t id)
+{
+    if(id)
+        execution_add(id);
+}
+
+void st_execution_set_active (line_number_t id)
+{
+    hal.irq_disable();
+    active_execution_id = id;
+    hal.irq_enable();
+}
+
+void st_execution_effect_queued (line_number_t id)
+{
+    execution_entry_t *entry;
+
+    if(id && (entry = execution_add(id)))
+        entry->expected++;
+}
+
+void st_execution_close (line_number_t id)
+{
+    execution_entry_t *entry;
+
+    if(id && (entry = execution_find(id)))
+        entry->open = false;
+}
+
+void st_execution_cancel (line_number_t id)
+{
+    uint_fast8_t idx = 0;
+
+    while(idx < execution_ledger_count) {
+        if(execution_ledger[idx].id == id)
+            execution_remove(idx);
+        else
+            idx++;
+    }
+
+    if(active_execution_id == id)
+        active_execution_id = 0;
+}
+
+void st_execution_complete_isr (line_number_t id)
+{
+    execution_queue_push(id);
+}
+
+void st_execution_complete (line_number_t id)
+{
+    if(id) {
+        hal.irq_disable();
+        execution_queue_push(id);
+        hal.irq_enable();
+    }
+}
+
+void st_execution_process (void)
+{
+    line_number_t id;
+    uint_fast8_t idx;
+    output_command_t *commands;
+
+    for(;;) {
+        hal.irq_disable();
+        if(output_free_count) {
+            commands = output_free_queue[output_free_tail];
+            output_free_tail = (output_free_tail + 1) % SEGMENT_BUFFER_SIZE;
+            output_free_count--;
+        } else
+            commands = NULL;
+        hal.irq_enable();
+
+        if(!commands)
+            break;
+
+        gc_clear_output_commands(commands);
+    }
+
+    for(idx = 0; idx < SEGMENT_BUFFER_SIZE - 1; idx++) {
+        hal.irq_disable();
+        commands = st_block_buffer[idx].output_commands_to_free && !st_block_buffer[idx].output_commands
+            ? st_block_buffer[idx].output_commands_to_free
+            : NULL;
+        if(commands)
+            st_block_buffer[idx].output_commands_to_free = NULL;
+        hal.irq_enable();
+        if(commands)
+            gc_clear_output_commands(commands);
+    }
+
+    for(;;) {
+        hal.irq_disable();
+        if(execution_queue_count) {
+            id = execution_queue[execution_queue_tail];
+            execution_queue_tail = (execution_queue_tail + 1) % EXECUTION_QUEUE_SIZE;
+            execution_queue_count--;
+        } else
+            id = 0;
+        hal.irq_enable();
+
+        if(!id)
+            break;
+
+        execution_entry_t *entry = execution_find(id);
+        if(entry && entry->completed < entry->expected) {
+            entry->completed++;
+
+            if(!entry->open && entry->completed == entry->expected) {
+                idx = (uint_fast8_t)(entry - execution_ledger);
+                last_completed_execution_id = entry->id;
+                if(active_execution_id == entry->id)
+                    active_execution_id = 0;
+                execution_emit("[EXEC:", entry->id);
+                execution_remove(idx);
+            }
+        }
+    }
+
+    idx = 0;
+    while(idx < execution_ledger_count) {
+        execution_entry_t *entry = &execution_ledger[idx];
+        if(!entry->open && entry->expected == entry->completed) {
+            if(entry->expected) {
+                last_completed_execution_id = entry->id;
+                if(active_execution_id == entry->id)
+                    active_execution_id = 0;
+                execution_emit("[EXEC:", entry->id);
+            }
+            execution_remove(idx);
+        } else
+            idx++;
+    }
+
+    if(execution_overflow && !execution_overflow_reported) {
+        execution_overflow_reported = true;
+        hal.stream.write_all("[EXEC_OVERFLOW]" ASCII_EOL);
+    }
+}
+
+void st_execution_abort (void)
+{
+    uint_fast8_t idx;
+
+    st_execution_process();
+
+    for(idx = 0; idx < execution_ledger_count; idx++) {
+        execution_entry_t *entry = &execution_ledger[idx];
+        if(entry->expected > entry->completed || entry->open) {
+            execution_emit("[EXEC_ABORT:", entry->id);
+            break;
+        }
+    }
+
+    execution_ledger_count = 0;
+    active_execution_id = 0;
+}
+
+void st_execution_get_status (line_number_t *active, line_number_t *last_completed)
+{
+    hal.irq_disable();
+    if(active)
+        *active = active_execution_id;
+    if(last_completed)
+        *last_completed = last_completed_execution_id;
+    hal.irq_enable();
+}
 #if REPORT_REALTIME_AXIS_VELOCITY
 static float realtime_axis_rate[N_AXIS] = {0.0f};
 #endif
@@ -554,6 +823,8 @@ ISR_CODE void ISR_FUNC(stepper_driver_interrupt_handler)(void)
                     report_add_realtime(Report_WCO|Report_ForceWCO);
 
                 st.exec_block = st.exec_segment->exec_block;
+                if(st.exec_block->execution_id)
+                    active_execution_id = st.exec_block->execution_id;
                 st.step_event_count = st.exec_block->step_event_count;
                 st.new_block = true;
 #if ENABLE_BACKLASH_COMPENSATION
@@ -566,12 +837,23 @@ ISR_CODE void ISR_FUNC(stepper_driver_interrupt_handler)(void)
                 // Execute output commands to be synchronized with motion
                 while(st.exec_block->output_commands) {
                     output_command_t *cmd = st.exec_block->output_commands;
+                    bool applied;
+                    if(cmd->execution_id)
+                        active_execution_id = cmd->execution_id;
                     if(cmd->is_digital)
-                        ioport_digital_out(cmd->port, cmd->value != 0.0f);
+                        applied = ioport_digital_out(cmd->port, cmd->value != 0.0f);
                     else
-                        ioport_analog_out(cmd->port, cmd->value);
+                        applied = ioport_analog_out(cmd->port, cmd->value);
+                    if(applied)
+                        st_execution_complete_isr(cmd->execution_id);
                     st.exec_block->output_commands = cmd->next;
+                    if(st.exec_block->execution_id)
+                        active_execution_id = st.exec_block->execution_id;
+                    else if(!applied)
+                        active_execution_id = 0;
                 }
+                if(output_free_push_isr(st.exec_block->output_commands_to_free))
+                    st.exec_block->output_commands_to_free = NULL;
 
                 // Enqueue any message to be printed (by foreground process)
                 if(st.exec_block->message) {
@@ -775,6 +1057,8 @@ ISR_CODE void ISR_FUNC(stepper_driver_interrupt_handler)(void)
 
     if(st.step_count == 0 || --st.step_count == 0) {
         // Segment is complete. Advance segment tail pointer.
+        if(st.exec_segment->block_end)
+            st_execution_complete_isr(st.exec_segment->exec_block->execution_id);
         segment_buffer_tail = segment_buffer_tail->next;
     }
 }
@@ -788,6 +1072,24 @@ FLASHMEM void st_reset (void)
         hal.probe.configure(false, false);
 
     st_go_idle(); // Initialize stepper driver idle state.
+
+    while(output_free_count) {
+        output_command_t *commands;
+        hal.irq_disable();
+        commands = output_free_queue[output_free_tail];
+        output_free_tail = (output_free_tail + 1) % SEGMENT_BUFFER_SIZE;
+        output_free_count--;
+        hal.irq_enable();
+        gc_clear_output_commands(commands);
+    }
+
+    uint_fast16_t output_idx;
+    for(output_idx = 0; output_idx < SEGMENT_BUFFER_SIZE - 1; output_idx++) {
+        if(st_block_buffer[output_idx].output_commands_to_free) {
+            gc_clear_output_commands(st_block_buffer[output_idx].output_commands_to_free);
+            st_block_buffer[output_idx].output_commands_to_free = NULL;
+        }
+    }
 
 #if SPINDLE_SYNC_ENABLE
     if(hal.stepper.pulse_start == st_spindle_sync_out)
@@ -854,6 +1156,8 @@ FLASHMEM void st_reset (void)
         system_register_commands(&jerk_commands);
     }
 #endif
+
+    st_execution_abort();
 }
 
 // Called by spindle_set_state() to inform about RPM changes.
@@ -1008,11 +1312,14 @@ void st_prep_buffer (void)
 
                 st_prep_block->direction = pl_block->direction;
                 st_prep_block->programmed_rate = pl_block->programmed_rate;
+                st_prep_block->execution_id = pl_block->execution_id;
 //                st_prep_block->r = pl_block->programmed_rate;
                 st_prep_block->millimeters = pl_block->millimeters;
                 st_prep_block->steps_per_mm = (float)pl_block->step_event_count / pl_block->millimeters;
                 st_prep_block->spindle = pl_block->spindle.hal;
                 st_prep_block->output_commands = pl_block->output_commands;
+                st_prep_block->output_commands_to_free = pl_block->output_commands;
+                pl_block->output_commands = NULL;
                 st_prep_block->overrides = pl_block->overrides;
                 st_prep_block->offset_id = pl_block->offset_id;
                 st_prep_block->backlash_motion = pl_block->condition.backlash_motion;
@@ -1155,6 +1462,7 @@ void st_prep_buffer (void)
 
         // Set new segment to point to the current segment data block.
         prep_segment->exec_block = st_prep_block;
+        prep_segment->block_end = false;
         prep_segment->update_rpm = NULL;
         prep_segment->update_pwm = NULL;
 
@@ -1498,6 +1806,7 @@ if(jlog.idx < sizeof(jlog.data) - 1 && prep.ramp_type != Ramp_Cruise) {
                 return; // Bail!
             } else { // End of planner block
                 // The planner block is complete. All steps are set to be executed in the segment buffer.
+                prep_segment->block_end = true;
                 if (sys.step_control.execute_sys_motion) {
                     sys.step_control.end_motion = On;
                     return;

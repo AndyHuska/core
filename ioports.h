@@ -219,6 +219,7 @@ typedef struct ioports_cfg io_port_cfg_t;
 io_port_cfg_t *ioports_cfg (io_port_cfg_t *p, io_port_type_t type, io_port_direction_t dir);
 uint8_t ioports_available (io_port_type_t type, io_port_direction_t dir);
 uint8_t ioports_unclaimed (io_port_type_t type, io_port_direction_t dir);
+uint32_t ioports_get_digital_state (io_port_direction_t dir);
 xbar_t *ioport_get_info (io_port_type_t type, io_port_direction_t dir, uint8_t port);
 xbar_t *ioport_claim (io_port_type_t type, io_port_direction_t dir, uint8_t *port, const char *description);
 bool ioport_claimable (io_port_type_t type, io_port_direction_t dir, uint8_t port);

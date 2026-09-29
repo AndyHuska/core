@@ -90,6 +90,7 @@ typedef struct plan_block {
     gc_override_flags_t overrides;  // Block bitfield variable for overrides
     planner_cond_t condition;       // Block bitfield variable defining block run conditions. Copied from pl_line_data.
     line_number_t line_number;      // Block line number for real-time reporting. Copied from pl_line_data.
+    line_number_t execution_id;     // Explicit host N word; zero when untagged.
     float target_mm[N_AXIS];        // Block target end location in mm for real-time reporting of distance to go.
 
     // Fields used by the motion planner to manage acceleration. Some of these values may be updated
@@ -148,6 +149,7 @@ typedef struct {
     gc_override_flags_t overrides;  // Block bitfield variable for overrides
     offset_id_t offset_id;
     line_number_t line_number;      // Desired line number to report when executing.
+    line_number_t execution_id;     // Explicit host N word; zero when untagged.
 //    void *parameters;               // TODO: pointer to extra parameters, for canned cycles and threading?
     char *message;                  // Message to be displayed when block is executed.
     output_command_t *output_commands;

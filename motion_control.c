@@ -34,6 +34,7 @@
 #include "protocol.h"
 #include "machine_limits.h"
 #include "state_machine.h"
+#include "stepper.h"
 #include "motion_control.h"
 #include "tool_change.h"
 #ifdef KINEMATICS_API
@@ -616,7 +617,7 @@ FLASHMEM bool mc_canned_drill (motion_mode_t motion, float *target, plan_line_da
             }
 
             if(canned->dwell > 0.0f)
-                mc_dwell(canned->dwell);
+                mc_dwell(canned->dwell, pl_data->execution_id);
 
             if(canned->spindle_off)
                 pl_data->spindle.hal->set_state(pl_data->spindle.hal, (spindle_state_t){0}, 0.0f);
@@ -827,10 +828,12 @@ FLASHMEM status_code_t mc_jog_execute (plan_line_data_t *pl_data, parser_block_t
 }
 
 // Execute dwell in seconds.
-FLASHMEM void mc_dwell (float seconds)
+FLASHMEM void mc_dwell (float seconds, line_number_t execution_id)
 {
     if (state_get() != STATE_CHECK_MODE) {
         protocol_buffer_synchronize();
+        if(execution_id)
+            st_execution_set_active(execution_id);
         delay_sec(seconds, DelayMode_Dwell);
     }
 }

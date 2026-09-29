@@ -30,6 +30,7 @@
 #include "nuts_bolts.h"
 #include "planner.h"
 #include "protocol.h"
+#include "stepper.h"
 
 #ifndef ROTARY_FIX
 #define ROTARY_FIX 0
@@ -419,6 +420,7 @@ bool plan_buffer_line (float *target, plan_line_data_t *pl_data)
     block->condition = pl_data->condition;
     block->overrides = pl_data->overrides;
     block->line_number = pl_data->line_number;
+    block->execution_id = pl_data->execution_id;
     block->offset_id = pl_data->offset_id;
     block->output_commands = pl_data->output_commands;
     block->message = pl_data->message;
@@ -661,6 +663,7 @@ bool plan_buffer_line (float *target, plan_line_data_t *pl_data)
         planner_recalculate();
     }
 
+    st_execution_effect_queued(block->execution_id);
     return true;
 }
 

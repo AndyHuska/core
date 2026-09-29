@@ -303,6 +303,7 @@ typedef struct output_command {
     bool is_digital;
     uint8_t port;
     int32_t value;
+    line_number_t execution_id;
     struct output_command *next;
 } output_command_t;
 

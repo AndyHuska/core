@@ -520,7 +520,6 @@ bool protocol_exec_rt_system (void)
 
         // Execute system abort.
         if((sys.reset_pending = bit_istrue(rt_exec, EXEC_RESET))) {
-
             if(!killed) {
                 // Kill spindle and coolant.
                 spindle_all_off(true);
@@ -541,6 +540,8 @@ bool protocol_exec_rt_system (void)
 
             if(!killed) // Tell driver/plugins about reset.
                 hal.driver_reset();
+
+            st_execution_abort();
 
             return !sys.abort; // Nothing else to do but exit.
         }
@@ -584,8 +585,8 @@ bool protocol_exec_rt_system (void)
             }
 
             gc_init(true);
-            plan_reset();
             st_reset();
+            plan_reset();
             sync_position();
 
             // Kill spindle and coolant. TODO: Check Mach3 behaviour?

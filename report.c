@@ -37,7 +37,9 @@
 #include "report.h"
 #include "nvs_buffer.h"
 #include "machine_limits.h"
+#include "ioports.h"
 #include "state_machine.h"
+#include "stepper.h"
 #include "canbus.h"
 #include "regex.h"
 
@@ -50,6 +52,38 @@ static char *(*get_axis_values)(float *axis_values);
 static char *(*get_axis_value)(float value);
 static char *(*get_rate_value)(float value);
 static const char vbar[2] = { '|', '\0' };
+
+#if defined(H743_MOSFET_PWM_ENABLE) && H743_MOSFET_PWM_ENABLE
+extern uint16_t h743_mosfet_pwm_get_relay_state (void);
+#endif
+
+static void report_hex32 (stream_write_ptr stream_write, uint32_t value)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    char text[9];
+    uint_fast8_t idx;
+
+    for(idx = 0; idx < 8; idx++) {
+        text[7 - idx] = hex[value & 0x0F];
+        value >>= 4;
+    }
+    text[8] = '\0';
+    stream_write(text);
+}
+
+static void report_hex16 (stream_write_ptr stream_write, uint16_t value)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    char text[5];
+    uint_fast8_t idx;
+
+    for(idx = 0; idx < 4; idx++) {
+        text[3 - idx] = hex[value & 0x0F];
+        value >>= 4;
+    }
+    text[4] = '\0';
+    stream_write(text);
+}
 
 // Append a number of strings to the static buffer
 // NOTE: do NOT use for several int/float conversions as these share the same underlying buffer!
@@ -1189,6 +1223,8 @@ void report_realtime_status (stream_write_ptr stream_write, status_report_tracki
 {
     static bool probing = false;
 
+    st_execution_process();
+
     uint_fast8_t idx;
     bool gcode_mode_changed = false;
     float print_position[N_AXIS], wco[N_AXIS], dist_remaining[N_AXIS];
@@ -1304,6 +1340,13 @@ void report_realtime_status (stream_write_ptr stream_write, status_report_tracki
         if(line_number)
             stream_write(appendbuf(2, "|Ln:", uitoa(line_number)));
     }
+
+    line_number_t active_execution_id, last_completed_execution_id;
+    st_execution_get_status(&active_execution_id, &last_completed_execution_id);
+    stream_write("|Exec:");
+    stream_write(uitoa(active_execution_id));
+    stream_write(",");
+    stream_write(uitoa(last_completed_execution_id));
 
     if(report->flags.distance_to_go) {
         // Report distance-to-go.
@@ -1594,6 +1637,17 @@ void report_realtime_status (stream_write_ptr stream_write, status_report_tracki
         if(report->flags.tool_offset)
             system_set_exec_state_flag(EXEC_TLO_REPORT);
     }
+
+    stream_write("|DI:");
+    report_hex32(stream_write, ioports_get_digital_state(Port_Input));
+    stream_write("|DO:");
+    report_hex32(stream_write, ioports_get_digital_state(Port_Output));
+    stream_write("|DR:");
+#if defined(H743_MOSFET_PWM_ENABLE) && H743_MOSFET_PWM_ENABLE
+    report_hex16(stream_write, h743_mosfet_pwm_get_relay_state());
+#else
+    report_hex16(stream_write, 0);
+#endif
 
     stream_write(">" ASCII_EOL);
 

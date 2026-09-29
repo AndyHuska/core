@@ -2135,7 +2135,7 @@ Set this value to -1 or AXES_BITMASK to invert all fault signals or specify for 
 ///@}
 
 /*! @name $481 - Setting_AutoReportInterval
-Auto status report interval, allowed range is 100 - 1000. Set to 0 to disable.
+Auto status report interval, allowed range is 20 - 1000. Set to 0 to disable.
 */
 ///@{
 #if !defined DEFAULT_AUTOREPORT_INTERVAL || defined __DOXYGEN__

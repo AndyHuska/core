@@ -33,6 +33,7 @@
 #include "machine_limits.h"
 #include "report.h"
 #include "state_machine.h"
+#include "stepper.h"
 #include "nvs_buffer.h"
 #include "stream.h"
 #if NGC_EXPRESSIONS_ENABLE
@@ -551,6 +552,8 @@ static void task_execute (sys_state_t state)
     static volatile bool lock = false;
 
     core_task_t *task;
+
+    st_execution_process();
 
     if(tasks.immediate && sys.driver_started) {
 

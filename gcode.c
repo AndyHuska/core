@@ -28,6 +28,7 @@
 #include "hal.h"
 #include "motion_control.h"
 #include "protocol.h"
+#include "stepper.h"
 #include "state_machine.h"
 
 #if NGC_PARAMETERS_ENABLE
@@ -132,6 +133,7 @@ DCRAM parser_state_t gc_state;
 m98_macro_t *m98_macros = NULL;
 static tool_data_t *pending_tool = NULL;
 static output_command_t *output_commands = NULL; // Linked list
+static line_number_t current_execution_id = 0;
 static scale_factor_t scale_factor = {
     .ijk[X_AXIS] = 1.0f,
     .ijk[Y_AXIS] = 1.0f,
@@ -721,13 +723,27 @@ FLASHMEM static status_code_t macro_call (macro_id_t macro, line_number_t line_n
 
 static status_code_t gc_at_exit (status_code_t status)
 {
+    if(current_execution_id) {
+        if(status == Status_OK || status == Status_Handled)
+            st_execution_close(current_execution_id);
+        else
+            st_execution_cancel(current_execution_id);
+        current_execution_id = 0;
+    }
+
     if(!(status == Status_OK || status == Status_Handled)) {
 
         pending_tool = NULL;
         gc_state.g43_pending = (tool_id_t)-1;
 
         // Clear any pending output commands
+        output_command_t *cmd = output_commands;
+        while(cmd) {
+            st_execution_cancel(cmd->execution_id);
+            cmd = cmd->next;
+        }
         gc_clear_output_commands(output_commands);
+        output_commands = NULL;
 
         // Clear any registered M98 macros
         macros_clear();
@@ -987,6 +1003,8 @@ FLASHMEM static bool add_output_command (output_command_t *command)
     if((add_cmd = malloc(sizeof(output_command_t)))) {
 
         memcpy(add_cmd, command, sizeof(output_command_t));
+        add_cmd->next = NULL;
+        st_execution_effect_queued(command->execution_id);
 
         if(output_commands == NULL)
             output_commands = add_cmd;
@@ -1236,6 +1254,8 @@ status_code_t gc_execute_block (char *block)
     } single_meaning_value = {0};
 
     bool fs_changed;
+    line_number_t execution_id = 0;
+    current_execution_id = 0;
     if((fs_changed = gc_state.file_stream ? hal.stream.file == NULL : hal.stream.file != NULL))
         gc_state.file_stream = hal.stream.file != NULL;
 
@@ -1981,6 +2001,8 @@ status_code_t gc_execute_block (char *block)
                     case 'N':
                         word_bit.parameter.n = On;
                         gc_block.values.n = (int32_t)truncf(value);
+                        if(gc_block.values.n > 0)
+                            execution_id = (line_number_t)gc_block.values.n;
 #if NGC_EXPRESSIONS_ENABLE
                         skip_blocks = gc_state.skip_blocks;
 #endif
@@ -3787,6 +3809,9 @@ status_code_t gc_execute_block (char *block)
 
     bool check_mode = state_get() == STATE_CHECK_MODE;
 
+    if(check_mode)
+        execution_id = 0;
+
     if(command_words.G16) switch(gc_block.macro_call) {
 
         case MacroCall_NonModal:
@@ -3834,6 +3859,10 @@ status_code_t gc_execute_block (char *block)
     // [0. Non-specific/common error-checks and miscellaneous setup]:
     // NOTE: If no line number is present, the value is zero.
     plan_data.line_number = gc_state.line_number = (line_number_t)gc_block.values.n; // Record data for planner use.
+    plan_data.execution_id = execution_id;
+    gc_block.output_command.execution_id = execution_id;
+    current_execution_id = execution_id;
+    st_execution_begin(execution_id);
 
     // [1. Comments feedback ]: Extracted in protocol.c if HAL entry point provided
     if(message && !check_mode && (plan_data.message = malloc(strlen(message) + 1)))
@@ -3873,7 +3902,11 @@ status_code_t gc_execute_block (char *block)
         if(sspindle->state.on && !gc_parser_flags.laser_is_motion) {
             sspindle->hal->param->rpm = gc_block.values.s;
             protocol_buffer_synchronize();
-            spindle_set_state(sspindle->hal, sspindle->state, gc_parser_flags.laser_disable ? 0.0f : gc_block.values.s);
+            if(spindle_set_state(sspindle->hal, sspindle->state, gc_parser_flags.laser_disable ? 0.0f : gc_block.values.s) && execution_id) {
+                st_execution_set_active(execution_id);
+                st_execution_effect_queued(execution_id);
+                st_execution_complete(execution_id);
+            }
         }
         sspindle->rpm = gc_block.values.s; // Update spindle speed state.
     }
@@ -3940,7 +3973,11 @@ status_code_t gc_execute_block (char *block)
 
             case IoMCode_OutputOnImmediate:
             case IoMCode_OutputOffImmediate:
-                ioport_digital_out(gc_block.output_command.port, gc_block.output_command.value != 0.0f);
+                if(ioport_digital_out(gc_block.output_command.port, gc_block.output_command.value != 0.0f) && execution_id) {
+                    st_execution_set_active(execution_id);
+                    st_execution_effect_queued(execution_id);
+                    st_execution_complete(execution_id);
+                }
                 break;
 
             case IoMCode_WaitOnInput:
@@ -3953,7 +3990,11 @@ status_code_t gc_execute_block (char *block)
                 break;
 
             case IoMCode_AnalogOutImmediate:
-                ioport_analog_out(gc_block.output_command.port, gc_block.output_command.value);
+                if(ioport_analog_out(gc_block.output_command.port, gc_block.output_command.value) && execution_id) {
+                    st_execution_set_active(execution_id);
+                    st_execution_effect_queued(execution_id);
+                    st_execution_complete(execution_id);
+                }
                 break;
         }
     }
@@ -4030,6 +4071,11 @@ status_code_t gc_execute_block (char *block)
                     if((spindle_ok = sys_spindle->state.value != gc_block.spindle_modal.state.value)) {
 
                         if((spindle_ok = spindle_set_state_synced(sys_spindle->hal, gc_block.spindle_modal.state, sys_spindle->rpm, sys_spindle->rpm_mode))) {
+                            if(execution_id) {
+                                st_execution_set_active(execution_id);
+                                st_execution_effect_queued(execution_id);
+                                st_execution_complete(execution_id);
+                            }
                             if((sys_spindle->state = sys_spindle->hal->param->state = gc_block.spindle_modal.state).on)
                                 sspindle = sys_spindle;
                         }
@@ -4049,7 +4095,14 @@ status_code_t gc_execute_block (char *block)
         if((spindle_ok = sspindle->state.value != gc_block.spindle_modal.state.value)) {
 
             if((spindle_ok = spindle_set_state_synced(sspindle->hal, gc_block.spindle_modal.state, plan_data.spindle.rpm, sspindle->rpm_mode)))
+            {
                 sspindle->state = sspindle->hal->param->state = gc_block.spindle_modal.state;
+                if(execution_id) {
+                    st_execution_set_active(execution_id);
+                    st_execution_effect_queued(execution_id);
+                    st_execution_complete(execution_id);
+                }
+            }
 
             spindle_event = !spindle_ok;
         }
@@ -4159,8 +4212,14 @@ status_code_t gc_execute_block (char *block)
     if(command_words.M8) {
     // NOTE: Coolant M-codes are modal. Only one command per line is allowed. But, multiple states
     // can exist at the same time, while coolant disable clears all states.
-        if(coolant_set_state_synced(gc_block.modal.coolant))
+        if(coolant_set_state_synced(gc_block.modal.coolant)) {
             gc_state.modal.coolant = gc_block.modal.coolant;
+            if(execution_id) {
+                st_execution_set_active(execution_id);
+                st_execution_effect_queued(execution_id);
+                st_execution_complete(execution_id);
+            }
+        }
     }
 
     plan_data.condition.coolant = gc_state.modal.coolant; // Set condition flag for planner use.
@@ -4196,8 +4255,13 @@ status_code_t gc_execute_block (char *block)
     }
 
     // [10. Dwell ]:
-    if(gc_block.non_modal_command == NonModal_Dwell)
-        mc_dwell(gc_block.values.p);
+    if(gc_block.non_modal_command == NonModal_Dwell) {
+        if(execution_id)
+            st_execution_effect_queued(execution_id);
+        mc_dwell(gc_block.values.p, execution_id);
+        if(execution_id && !sys.cancel)
+            st_execution_complete(execution_id);
+    }
 
     // [11. Set active plane ]:
     if(command_words.G2)
@@ -4719,5 +4783,5 @@ status_code_t gc_execute_block (char *block)
 
     // TODO: % to denote start of program.
 
-    return Status_OK;
+    return gc_at_exit(Status_OK);
 }

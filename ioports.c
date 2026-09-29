@@ -202,6 +202,22 @@ FLASHMEM uint8_t ioports_unclaimed (io_port_type_t type, io_port_direction_t dir
     return p_data->free;
 }
 
+uint32_t ioports_get_digital_state (io_port_direction_t dir)
+{
+    uint32_t state = 0;
+    uint8_t n_ports = min(ioports_available(Port_Digital, dir), 32);
+    uint8_t port;
+
+    for(port = 0; port < n_ports; port++) {
+        xbar_t *pin = ioport_get_info(Port_Digital, dir, port);
+
+        if(pin && pin->get_value && pin->get_value(pin) != 0.0f)
+            state |= (uint32_t)1 << port;
+    }
+
+    return state;
+}
+
 struct ff_data {
     uint8_t port;
     uint32_t max_port;
