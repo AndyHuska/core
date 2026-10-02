@@ -47,6 +47,83 @@ extern void st_spindle_sync_cfg (settings_t *settings, settings_changed_flags_t 
 
 settings_t settings;
 
+static float axis_deceleration[N_AXIS];
+static nvs_address_t deceleration_address;
+static char axis_deceleration_unit[10] = "mm/sec^2";
+
+float settings_get_deceleration (uint8_t axis)
+{
+    return axis_deceleration[axis] > 0.0f ? axis_deceleration[axis] : settings.axis[axis].acceleration;
+}
+
+static status_code_t set_deceleration (setting_id_t setting, float value)
+{
+    uint_fast8_t axis = setting - Setting_AxisDeceleration;
+    float rate = value * 60.0f * 60.0f;
+
+    if(axis >= N_AXIS || !isfinite(rate) || rate < 0.0f || (value > 0.0f && rate == 0.0f))
+        return Status_SettingValueOutOfRange;
+
+    axis_deceleration[axis] = rate;
+
+    return Status_OK;
+}
+
+static float get_deceleration (setting_id_t setting)
+{
+    return axis_deceleration[setting - Setting_AxisDeceleration] / (60.0f * 60.0f);
+}
+
+static void deceleration_save (void)
+{
+    if(deceleration_address)
+        hal.nvs.memcpy_to_nvs(deceleration_address, (uint8_t *)axis_deceleration, sizeof(axis_deceleration), true);
+}
+
+static void deceleration_restore (void)
+{
+    memset(axis_deceleration, 0, sizeof(axis_deceleration));
+    deceleration_save();
+}
+
+static void deceleration_load (void)
+{
+    if(!deceleration_address || hal.nvs.memcpy_from_nvs((uint8_t *)axis_deceleration, deceleration_address, sizeof(axis_deceleration), true) != NVS_TransferResult_OK) {
+        deceleration_restore();
+        return;
+    }
+
+    for(uint_fast8_t axis = 0; axis < N_AXIS; axis++) {
+        if(!isfinite(axis_deceleration[axis]) || axis_deceleration[axis] < 0.0f) {
+            deceleration_restore();
+            break;
+        }
+    }
+}
+
+void settings_deceleration_init (void)
+{
+    static const setting_detail_t deceleration_settings[] = {
+        { Setting_AxisDeceleration, Group_Axis0, "-axis deceleration", axis_deceleration_unit, Format_Decimal, "#####0.000", "0", NULL, Setting_IsExtendedFn, set_deceleration, get_deceleration, NULL, { .subgroups = On, .increment = 1 } }
+    };
+    static const setting_descr_t deceleration_descriptions[] = {
+        { Setting_AxisDeceleration, "Maximum deceleration. Zero tracks the axis acceleration; a positive value sets an independent braking rate." }
+    };
+    static setting_details_t deceleration_details = {
+        .is_core = true,
+        .settings = deceleration_settings,
+        .n_settings = sizeof(deceleration_settings) / sizeof(setting_detail_t),
+        .descriptions = deceleration_descriptions,
+        .n_descriptions = sizeof(deceleration_descriptions) / sizeof(setting_descr_t),
+        .save = deceleration_save,
+        .load = deceleration_load,
+        .restore = deceleration_restore
+    };
+
+    deceleration_address = nvs_alloc(sizeof(axis_deceleration));
+    settings_register(&deceleration_details);
+}
+
 #if ENABLE_PATH_BLENDING
 #define G64_TOLERANCE_STORAGE_MARKER 0xA5
 #define G64_TOLERANCE_MIN 0.0f
@@ -1367,6 +1444,7 @@ static const char *set_axis_setting_unit (setting_id_t setting_id, uint_fast8_t 
             break;
 
         case Setting_AxisAcceleration:
+        case Setting_AxisDeceleration:
             unit = is_rotary ? "deg/sec^2" : "mm/sec^2";
             break;
 

@@ -349,6 +349,8 @@ FLASHMEM int grbl_enter (void)
     asymmetric_ganging_init();
 #endif
 
+    settings_deceleration_init();
+
 #if NVSDATA_BUFFER_ENABLE
     nvs_buffer_init();
 #endif

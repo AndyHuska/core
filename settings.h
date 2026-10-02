@@ -548,6 +548,7 @@ typedef enum {
     Setting_AxisHomingSeekRate   = Setting_AxisSettingsBase + 9 * AXIS_SETTINGS_INCREMENT,
 
     Setting_AxisJerk             = Setting_AxisSettingsBase1,
+    Setting_AxisDeceleration     = Setting_AxisSettingsBase1 + AXIS_SETTINGS_INCREMENT,
 
     // Calculated base values for driver/plugin stepper settings
     Setting_AxisExtended0        = Setting_AxisSettingsBase2,
@@ -1142,6 +1143,9 @@ bool settings_read_coord_data(coord_system_id_t id, coord_system_data_t *data);
 
 // Temporarily override acceleration, if 0 restore to configured setting value
 bool settings_override_acceleration (uint8_t axis, float acceleration);
+
+float settings_get_deceleration (uint8_t axis);
+void settings_deceleration_init (void);
 
 #if ENABLE_JERK_ACCELERATION
 // Temporarily override jerk, if 0 restore to configured setting value.
