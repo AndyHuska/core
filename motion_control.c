@@ -76,6 +76,7 @@ void mc_sync_backlash_position (void)
 #if ENABLE_PATH_BLENDING
 typedef struct {
     bool valid;
+    uint32_t timestamp;
     float start[N_AXIS];
     float target[N_AXIS];
     plan_line_data_t data;
@@ -104,6 +105,7 @@ static bool blend_store_candidate (float *target, plan_line_data_t *pl_data, flo
 
     memset(&blend_pending, 0, sizeof(blend_pending));
     blend_pending.valid = true;
+    blend_pending.timestamp = hal.get_elapsed_ticks ? hal.get_elapsed_ticks() : 0;
     memcpy(blend_pending.start, start, sizeof(float) * N_AXIS);
     memcpy(blend_pending.target, target, sizeof(float) * N_AXIS);
     memcpy(&blend_pending.data, pl_data, sizeof(plan_line_data_t));
@@ -274,6 +276,7 @@ static bool blend_resolve_corner (float *target, plan_line_data_t *pl_data)
         memcpy(blend_pending.start, p2, sizeof(float) * N_AXIS);
         memcpy(blend_pending.target, c, sizeof(float) * N_AXIS);
         blend_pending.valid = true;
+        blend_pending.timestamp = hal.get_elapsed_ticks ? hal.get_elapsed_ticks() : 0;
         st_execution_effect_queued(blend_pending.data.execution_id);
         return true;
     }
@@ -285,6 +288,13 @@ static bool blend_resolve_corner (float *target, plan_line_data_t *pl_data)
 void mc_path_blend_flush (void)
 {
     blend_flush_pending();
+}
+
+void mc_path_blend_flush_if_timeout (void)
+{
+    if(blend_pending.valid && (!hal.get_elapsed_ticks ||
+       (uint32_t)(hal.get_elapsed_ticks() - blend_pending.timestamp) >= PATH_BLEND_TIMEOUT_MS))
+        blend_flush_pending();
 }
 
 void mc_path_blend_cancel (void)

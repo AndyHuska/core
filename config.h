@@ -206,6 +206,10 @@ or EMI triggering the related interrupt falsely or too many times.
 #define ENABLE_PATH_BLENDING Off // Enable G61/G61.1/G64 path control and blending.
 #endif
 
+#if !defined PATH_BLEND_TIMEOUT_MS || defined __DOXYGEN__
+#define PATH_BLEND_TIMEOUT_MS 10 // Maximum wait for a following G64 move (ms).
+#endif
+
 #if !defined GCODE_ERROR_DETAILS_ENABLE || defined __DOXYGEN__
 #define GCODE_ERROR_DETAILS_ENABLE 0 // Append optional G-code error details to error responses.
 #endif

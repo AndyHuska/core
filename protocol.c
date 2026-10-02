@@ -353,9 +353,9 @@ bool protocol_main_loop (void)
         // this indicates that g-code streaming has either filled the planner buffer or has
         // completed. In either case, auto-cycle start, if enabled, any queued moves.
 #if ENABLE_PATH_BLENDING
-        // Nothing left to blend into once the planner has drained, so release the held G64 segment.
-        if(char_counter == 0 && plan_get_current_block() == NULL)
-            mc_path_blend_flush();
+        // Give the next G64 move a short window to arrive before releasing the held segment.
+        if(char_counter == 0)
+            mc_path_blend_flush_if_timeout();
 #endif
         protocol_auto_cycle_start();
 
