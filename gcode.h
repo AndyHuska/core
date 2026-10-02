@@ -733,6 +733,7 @@ char *gc_normalize_block (char *block, status_code_t *status, char **message);
 
 // Execute one block of rs275/ngc/g-code
 status_code_t gc_execute_block (char *block);
+const char *gc_get_error_detail (void);
 
 // Sets g-code parser position in mm. Input in steps. Called by the system abort and hard
 // limit pull-off routines.

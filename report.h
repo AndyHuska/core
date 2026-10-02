@@ -39,6 +39,7 @@ void report_init_fns (void);
 
 // Prints feedback message, typically from gcode.
 void report_message (const char *msg, message_type_t type);
+void report_set_error_detail (const char *detail);
 
 // Message helper to be run as foreground task.
 void report_plain (void *message);

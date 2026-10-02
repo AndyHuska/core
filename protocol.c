@@ -32,6 +32,8 @@
 #include "motion_control.h"
 #include "sleep.h"
 #include "protocol.h"
+#include "gcode.h"
+#include "report.h"
 #include "machine_limits.h"
 
 #ifndef RT_QUEUE_SIZE
@@ -242,6 +244,7 @@ bool protocol_main_loop (void)
               #endif
 
                 // Direct and execute one line of formatted input, and report status of execution.
+                report_set_error_detail(NULL);
                 if (line_flags.overflow) // Report line overflow error.
                     gc_state.last_error = Status_Overflow;
                 else if(*line == '\0') // Empty line. For syncing purposes.
@@ -268,8 +271,10 @@ bool protocol_main_loop (void)
                 else { // Parse and execute g-code block.
 
 #endif
-                    if((gc_state.last_error = gc_execute_block(line)) != Status_OK)
+                    if((gc_state.last_error = gc_execute_block(line)) != Status_OK) {
+                        report_set_error_detail(gc_get_error_detail());
                         eol = '\0';
+                    }
                 }
 
                 // Add a short delay for each block processed in Check Mode to
@@ -284,6 +289,7 @@ bool protocol_main_loop (void)
                     break;
                 else
                     grbl.report.status_message(gc_state.last_error);
+                report_set_error_detail(NULL);
 
                 // Reset tracking data for next line.
                 keep_rt_commands = false;

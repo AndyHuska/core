@@ -22,6 +22,7 @@
 */
 
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -129,7 +130,11 @@ typedef struct m98_macro {
 // Declare gc extern struct
 DCRAM parser_state_t gc_state;
 
-#define RETURN(status) return gc_at_exit(status);
+static const char *gc_error_detail = NULL;
+static char gc_error_detail_buffer[48];
+
+#define RETURN(status) return gc_at_exit(status, NULL);
+#define RETURN_DETAIL(status, detail) return gc_at_exit(status, detail);
 
 m98_macro_t *m98_macros = NULL;
 static tool_data_t *pending_tool = NULL;
@@ -722,8 +727,17 @@ FLASHMEM static status_code_t macro_call (macro_id_t macro, line_number_t line_n
     return status == Status_Unhandled ? Status_GcodeValueOutOfRange : (status == Status_Handled ? Status_OK : status);
 }
 
-static status_code_t gc_at_exit (status_code_t status)
+static status_code_t gc_at_exit (status_code_t status, const char *detail)
 {
+#if GCODE_ERROR_DETAILS_ENABLE
+    if(detail && status != Status_OK && status != Status_Handled)
+        gc_error_detail = detail;
+    else if(status == Status_GcodeUnsupportedCommand)
+        gc_error_detail = "Unsupported command; no specific detail registered";
+#else
+    (void)detail;
+#endif
+
 #if ENABLE_PATH_BLENDING
     if(status != Status_OK && status != Status_Handled)
         mc_path_blend_flush();
@@ -769,6 +783,13 @@ static status_code_t gc_at_exit (status_code_t status)
     return status;
 }
 
+const char *gc_get_error_detail (void)
+{
+    const char *detail = gc_error_detail;
+    gc_error_detail = NULL;
+    return detail;
+}
+
 FLASHMEM void gc_init (bool stop)
 {
 #if COMPATIBILITY_LEVEL > 1
@@ -811,7 +832,7 @@ FLASHMEM void gc_init (bool stop)
 #endif
 
     // Clear any pending output commands etc...
-    gc_at_exit(Status_UserException);
+    gc_at_exit(Status_UserException, NULL);
 
     gc_state.modal.override_ctrl = sys.override.control;    // Load default override status
     gc_state.spindle = &gc_state.modal.spindle[0];
@@ -1040,7 +1061,7 @@ static gc_thread_data thread;
 FLASHMEM static status_code_t init_sync_motion (plan_line_data_t *pl_data, float pitch)
 {
     if(pl_data->spindle.hal->get_data == NULL)
-        RETURN(Status_GcodeUnsupportedCommand); // [Spindle not sync capable]
+        RETURN_DETAIL(Status_GcodeUnsupportedCommand, "Spindle not sync capable"); // [Spindle not sync capable]
 
     pl_data->condition.inverse_time = Off;
     pl_data->feed_rate = gc_state.distance_per_rev = pitch;
@@ -1170,6 +1191,8 @@ char *gc_normalize_block (char *block, status_code_t *status, char **message)
 
 status_code_t gc_execute_block (char *block)
 {
+    gc_error_detail = NULL;
+
     PROGMEM static const parameter_words_t axis_words_mask = {
         .x = On,
         .y = On,
@@ -1267,7 +1290,7 @@ status_code_t gc_execute_block (char *block)
 
     block = gc_normalize_block(block, &status, &message);
     if(status != Status_OK)
-        RETURN(status);
+        RETURN_DETAIL(status, "Failed to normalize G-code block");
 
     // Determine if the line is a program start/end marker.
     if(*block == CMD_PROGRAM_DEMARCATION && block[1] == '\0') {
@@ -1447,7 +1470,7 @@ status_code_t gc_execute_block (char *block)
         if(user_mcode == UserMCode_NoValueWords && no_word_value(block[char_counter]))
             value = NAN;
         else if((status = ngc_read_real_value(block, &char_counter, &value)) != Status_OK)
-            RETURN(status);
+            RETURN_DETAIL(status, "Failed to read real value from G-code block");
 
         if(skip_blocks && letter != 'O')
             return Status_OK;
@@ -1512,7 +1535,7 @@ status_code_t gc_execute_block (char *block)
                             word_bit.modal_group.G15 = On;
                             gc_block.modal.diameter_mode = int_value == 7; // TODO: find specs for implementation, only affects X calculation? reporting? current position?
                         } else
-                            RETURN(Status_GcodeUnsupportedCommand); // [G7 & G8 not supported]
+                            RETURN_DETAIL(Status_GcodeUnsupportedCommand, "G7 & G8 not supported in Mode_Lathe"); // [G7 & G8 not supported]
                         break;
 
                     case 10: case 28: case 30: case 92:
@@ -1530,12 +1553,12 @@ status_code_t gc_execute_block (char *block)
                         gc_block.non_modal_command = (non_modal_t)int_value;
                         if ((int_value == 28) || (int_value == 30)) {
                             if (!((mantissa == 0) || (mantissa == 10)))
-                                RETURN(Status_GcodeUnsupportedCommand);
+                                RETURN_DETAIL(Status_GcodeUnsupportedCommand, "Unsupported G10/G28/G30 command with non-zero mantissa");
                             gc_block.non_modal_command += mantissa;
                             mantissa = 0; // Set to zero to indicate valid non-integer G command.
                         } else if (int_value == 92) {
                             if (!((mantissa == 0) || (mantissa == 10) || (mantissa == 20) || (mantissa == 30)))
-                                RETURN(Status_GcodeUnsupportedCommand);
+                                RETURN_DETAIL(Status_GcodeUnsupportedCommand, "Unsupported G92 command with non-zero mantissa");
                             gc_block.non_modal_command += mantissa;
                             mantissa = 0; // Set to zero to indicate valid non-integer G command.
                         }
@@ -1543,7 +1566,7 @@ status_code_t gc_execute_block (char *block)
 
                     case 33: case 76:
                         if(mantissa != 0)
-                            RETURN(Status_GcodeUnsupportedCommand); // [G33.1 not yet supported]
+                            RETURN_DETAIL(Status_GcodeUnsupportedCommand, "G33.1 not yet supported"); // [G33.1 not yet supported]
                         if (axis_command)
                             RETURN(Status_GcodeAxisCommandConflict); // [Axis word/command conflict]
                         axis_command = AxisCommand_MotionMode;
@@ -1556,7 +1579,7 @@ status_code_t gc_execute_block (char *block)
 
                     case 38:
                         if(!(hal.probe.get_state && ((mantissa == 20) || (mantissa == 30) || (mantissa == 40) || (mantissa == 50))))
-                            RETURN(Status_GcodeUnsupportedCommand); // [probing not supported by driver or unsupported G38.x command]
+                            RETURN_DETAIL(Status_GcodeUnsupportedCommand, "Probing not supported by driver or unsupported G38.x command"); // [probing not supported by driver or unsupported G38.x command]
                         int_value += (mantissa / 10) + 100;
                         mantissa = 0; // Set to zero to indicate valid non-integer G command.
                         // No break. Continues to next line.
@@ -1577,7 +1600,7 @@ status_code_t gc_execute_block (char *block)
                                 gc_block.modal.motion = MotionMode_QuadraticSpline;
                                 mantissa = 0; // Set to zero to indicate valid non-integer G command.
                             } else
-                                RETURN(Status_GcodeUnsupportedCommand);
+                                RETURN_DETAIL(Status_GcodeUnsupportedCommand, "Unsupported non-integer G80.x command");
                         } else
                             gc_block.modal.motion = (motion_mode_t)int_value;
                         gc_block.modal.canned_cycle_active = false;
@@ -1605,7 +1628,7 @@ status_code_t gc_execute_block (char *block)
                         } else {
                             word_bit.modal_group.G4 = On;
                             if ((mantissa != 10) || (int_value == 90))
-                                RETURN(Status_GcodeUnsupportedCommand); // [G90.1 not supported]
+                                RETURN_DETAIL(Status_GcodeUnsupportedCommand, "G91.1 is only supported non-integer code for G90 and G91"); // [G90.1 not supported]
                             mantissa = 0; // Set to zero to indicate valid non-integer G command.
                             // Otherwise, arc IJK incremental mode is default. G91.1 does nothing.
                         }
@@ -1651,7 +1674,7 @@ status_code_t gc_execute_block (char *block)
                             axis_command = AxisCommand_ToolLengthOffset;
                             gc_block.modal.tool_offset_mode = ToolLengthOffset_EnableDynamic;
                         } else
-                            RETURN(Status_GcodeUnsupportedCommand); // [Unsupported G43.x command]
+                            RETURN_DETAIL(Status_GcodeUnsupportedCommand, "Unsupported G43.x command"); // [Unsupported G43.x command]
                         mantissa = 0; // Set to zero to indicate valid non-integer G command.
                         break;
 
@@ -1663,7 +1686,7 @@ status_code_t gc_execute_block (char *block)
                                 gc_block.modal.g5x_offset.id += mantissa / 10;
                                 mantissa = 0;
                             } else
-                                RETURN(Status_GcodeUnsupportedCommand); // [Unsupported G59.x command]
+                                RETURN_DETAIL(Status_GcodeUnsupportedCommand, "Unsupported G59.x command"); // [Unsupported G59.x command]
                         }
                         break;
 
@@ -1671,7 +1694,7 @@ status_code_t gc_execute_block (char *block)
                     case 61:
                         word_bit.modal_group.G13 = On;
                         if (mantissa != 0 && mantissa != 10)
-                            RETURN(Status_GcodeUnsupportedCommand);
+                            RETURN_DETAIL(Status_GcodeUnsupportedCommand, "Unsupported G61.x command with path blending enabled"); // [Unsupported G61.x command]
                         gc_block.modal.control = mantissa == 0 ? ControlMode_ExactPath : ControlMode_ExactStop;
                         break;
 
@@ -1683,7 +1706,7 @@ status_code_t gc_execute_block (char *block)
                     case 61:
                         word_bit.modal_group.G13 = On;
                         if (mantissa != 0) // [G61.1 not supported]
-                            RETURN(Status_GcodeUnsupportedCommand);
+                            RETURN_DETAIL(Status_GcodeUnsupportedCommand, "Unsupported G61.x command"); // [Unsupported G61.1 command]
                         break;
 #endif
 
@@ -1701,7 +1724,7 @@ status_code_t gc_execute_block (char *block)
                             gc_block.macro_call = (macro_call_t)(int_value + mantissa * 10);
                             mantissa = 0;
                         } else
-                            RETURN(Status_GcodeUnsupportedCommand);
+                            RETURN_DETAIL(Status_GcodeUnsupportedCommand, "Fanuc style G66 macro call not supported");
                         break;
 
 #if NGC_PARAMETERS_ENABLE
@@ -1711,8 +1734,9 @@ status_code_t gc_execute_block (char *block)
                             if(!(command_words.G16 && gc_state.g66_args))
                                 word_bit.modal_group.G16 = On;
                             gc_block.macro_call = MacroCall_End;
-                        } else
-                            RETURN(Status_GcodeUnsupportedCommand);
+                        }
+                        else
+                            RETURN_DETAIL(Status_GcodeUnsupportedCommand, "Fanuc style G67 macro call not supported");
                         break;
 #endif
 
@@ -1721,7 +1745,7 @@ status_code_t gc_execute_block (char *block)
                             word_bit.modal_group.G14 = On;
                             gc_block.spindle_modal.rpm_mode = (spindle_rpm_mode_t)((int_value - 96) ^ 1);
                         } else
-                            RETURN(Status_GcodeUnsupportedCommand);
+                            RETURN_DETAIL(Status_GcodeUnsupportedCommand, "Unsupported G96/G97 command in Mode_Lathe");
                         break;
 
                     case 98: case 99:
@@ -1740,11 +1764,13 @@ status_code_t gc_execute_block (char *block)
                         word_bit.modal_group.G0 = On;
                         gc_block.non_modal_command = (non_modal_t)int_value;
                         if(mantissa != 0)
-                            RETURN(Status_GcodeUnsupportedCommand);
+                            RETURN_DETAIL(Status_GcodeUnsupportedCommand, "Unsupported G187 command with non-zero mantissa");
                         break;
 #endif
 
-                    default: RETURN(Status_GcodeUnsupportedCommand); // [Unsupported G command]
+                    default:
+                        snprintf(gc_error_detail_buffer, sizeof(gc_error_detail_buffer), "Unsupported G%lu command", (unsigned long)int_value);
+                        RETURN_DETAIL(Status_GcodeUnsupportedCommand, gc_error_detail_buffer);
                 } // end G-value switch
 
                 if (mantissa > 0)
@@ -1813,7 +1839,7 @@ status_code_t gc_execute_block (char *block)
                                     word_bit.modal_group.M6 = On;
                                     gc_block.tool_action = ToolAction_Change;
                                 } else
-                                    RETURN(Status_GcodeUnsupportedCommand); // [Unsupported M command]
+                                    RETURN_DETAIL(Status_GcodeUnsupportedCommand, "Unsupported M6 command with current ATC state"); // [Unsupported M command]
                             }
                         }
                         break;
@@ -1826,7 +1852,7 @@ status_code_t gc_execute_block (char *block)
 
                             case 7:
                                 if(!hal.coolant_cap.mist)
-                                    RETURN(Status_GcodeUnsupportedCommand);
+                                    RETURN_DETAIL(Status_GcodeUnsupportedCommand, "Unsupported M7 command without mist coolant capability");
                                 gc_block.modal.coolant.mist = On;
                                 break;
 
@@ -1843,7 +1869,7 @@ status_code_t gc_execute_block (char *block)
 
                     case 56:
                         if(!settings.parking.flags.enable_override_control) // TODO: check if enabled?
-                            RETURN(Status_GcodeUnsupportedCommand); // [Unsupported M command]
+                            RETURN_DETAIL(Status_GcodeUnsupportedCommand, "Unsupported M56 command without override control enabled"); // [Unsupported M command]
                         // no break
                     case 48: case 49: case 50: case 51: case 53:
                         word_bit.modal_group.M9 = On;
@@ -1860,7 +1886,7 @@ status_code_t gc_execute_block (char *block)
                     case 64:
                     case 65:
                         if(!ioports_can_do().digital_out || ioports_unclaimed(Port_Digital, Port_Output) == 0)
-                            RETURN(Status_GcodeUnsupportedCommand); // [Unsupported M command]
+                            RETURN_DETAIL(Status_GcodeUnsupportedCommand, "Unsupported M62-M65 command without proper I/O capability"); // [Unsupported M command]
                         word_bit.modal_group.M5 = On;
                         port_command = (io_mcode_t)int_value;
                         break;
@@ -1868,7 +1894,7 @@ status_code_t gc_execute_block (char *block)
                     case 66:
                         if(!ioports_can_do().wait_on_input || (ioports_unclaimed(Port_Digital, Port_Input) == 0 &&
                                                                 ioports_unclaimed(Port_Analog, Port_Input) == 0))
-                            RETURN(Status_GcodeUnsupportedCommand); // [Unsupported M command]
+                            RETURN_DETAIL(Status_GcodeUnsupportedCommand, "Unsupported M66 command without proper I/O capability"); // [Unsupported M command]
                         word_bit.modal_group.M5 = On;
                         port_command = (io_mcode_t)int_value;
                         break;
@@ -1876,7 +1902,7 @@ status_code_t gc_execute_block (char *block)
                     case 67:
                     case 68:
                         if(!ioports_can_do().analog_out || ioports_unclaimed(Port_Analog, Port_Output) == 0)
-                            RETURN(Status_GcodeUnsupportedCommand); // [Unsupported M command]
+                            RETURN_DETAIL(Status_GcodeUnsupportedCommand, "Unsupported M67-M68 command without proper I/O capability"); // [Unsupported M command]
                         word_bit.modal_group.M5 = On;
                         port_command = (io_mcode_t)int_value;
                         break;
@@ -1890,14 +1916,14 @@ status_code_t gc_execute_block (char *block)
 
                     case 98:
                         if(mantissa != 0 || grbl.on_macro_execute == NULL)
-                            RETURN(Status_GcodeUnsupportedCommand);
+                            RETURN_DETAIL(Status_GcodeUnsupportedCommand, "Unsupported M98 command with non-zero mantissa or no macro execute callback"); // [Unsupported M command]
                         word_bit.modal_group.G16 = On;
                         gc_block.macro_call = MacroCall_NonModal98;
                         break;
 
                     case 99:
                         if(mantissa != 0 || !(!!hal.stream.file || !!grbl.on_macro_return))
-                            RETURN(Status_GcodeUnsupportedCommand);
+                            RETURN_DETAIL(Status_GcodeUnsupportedCommand, "Unsupported M99 command with non-zero mantissa or no macro return callback"); // [Unsupported M command]
                         word_bit.modal_group.M4 = On;
                         gc_block.modal.program_flow = ProgramFlow_Return;
                         break;
@@ -1906,8 +1932,10 @@ status_code_t gc_execute_block (char *block)
                         if(grbl.user_mcode.check && (user_mcode = grbl.user_mcode.check((user_mcode_t)(mantissa ? int_value * 100 + mantissa : int_value)))) {
                             gc_block.user_mcode = (user_mcode_t)(mantissa ? int_value * 100 + mantissa : int_value);
                             word_bit.modal_group.M10 = On;
-                        } else
-                            RETURN(Status_GcodeUnsupportedCommand); // [Unsupported M command]
+                        } else {
+                            snprintf(gc_error_detail_buffer, sizeof(gc_error_detail_buffer), "Unsupported M%lu command", (unsigned long)int_value);
+                            RETURN_DETAIL(Status_GcodeUnsupportedCommand, gc_error_detail_buffer);
+                        }
                 } // end M-value switch
 
                 // Check for more than one command per modal group violations in the current block
@@ -2132,7 +2160,7 @@ status_code_t gc_execute_block (char *block)
                         gc_block.values.$ = (int32_t)value;
                         break;
 
-                    default: RETURN(Status_GcodeUnsupportedCommand);
+                    default: RETURN_DETAIL(Status_GcodeUnsupportedCommand, "Unsupported parameter letter"); // [Unsupported parameter letter]
 
                 } // end parameter letter switch
 
@@ -2300,7 +2328,7 @@ status_code_t gc_execute_block (char *block)
 
         user_words.mask = gc_block.words.mask;
         if((int_value = (uint_fast16_t)grbl.user_mcode.validate(&gc_block)))
-            RETURN((status_code_t)int_value);
+            RETURN_DETAIL((status_code_t)int_value, "User M-code validation failed");
 
         parameter_words_t taken_words;
 
@@ -2439,12 +2467,12 @@ status_code_t gc_execute_block (char *block)
 #endif
 
     if(gc_block.modal.feed_mode == FeedMode_UnitsPerRev && (sspindle == NULL || !sspindle->hal->get_data))
-        RETURN(Status_GcodeUnsupportedCommand); // [G95 not supported]
+        RETURN_DETAIL(Status_GcodeUnsupportedCommand, "G95 not supported when spindle is not enabled or does not support get_data"); // [G95 not supported]
 
     if(command_words.G14) {
         if(gc_block.spindle_modal.rpm_mode == SpindleSpeedMode_CSS) {
             if(!sspindle->hal->cap.variable)
-                RETURN(Status_GcodeUnsupportedCommand);
+                RETURN_DETAIL(Status_GcodeUnsupportedCommand, "G14 not supported when spindle does not support variable CSS");
             if(!gc_block.words.s) // TODO: add check for S0?
                 RETURN(Status_GcodeValueWordMissing);
     // see below!! gc_block.values.s *= (gc_block.modal.units_imperial ? MM_PER_INCH * 12.0f : 1000.0f); // convert surface speed to mm/min
@@ -2596,12 +2624,12 @@ status_code_t gc_execute_block (char *block)
                 do {
                     idx--;
                     if(gc_state.modal.spindle[idx].hal && !(gc_state.modal.spindle[idx].hal->cap.direction || gc_state.modal.spindle[idx].hal->cap.laser))
-                        RETURN(Status_GcodeUnsupportedCommand);
+                        RETURN_DETAIL(Status_GcodeUnsupportedCommand, "Unsupported M7 command without spindle direction or laser capability");
                 } while(idx);
             } else
 #endif
             if(!(sspindle->hal->cap.direction || sspindle->hal->cap.laser))
-                RETURN(Status_GcodeUnsupportedCommand);
+                RETURN_DETAIL(Status_GcodeUnsupportedCommand, "Unsupported M7 command without spindle direction or laser capability");
         }
     } else if(sspindle)
         gc_block.spindle_modal.state = sspindle->state;
@@ -2841,7 +2869,7 @@ status_code_t gc_execute_block (char *block)
                     } else if(!command_words.M6)
                         gc_block.values.h = gc_block.words.t ? gc_block.values.t : (float)gc_state.tool->tool_id;
                 } else
-                    RETURN(Status_GcodeUnsupportedCommand);
+                    RETURN_DETAIL(Status_GcodeUnsupportedCommand, "Tool length offset enable not supported without a tool table");
                 break;
 
             case ToolLengthOffset_ApplyAdditional:
@@ -2853,7 +2881,7 @@ status_code_t gc_execute_block (char *block)
                     } else
                         RETURN(Status_GcodeValueWordMissing);
                 } else
-                    RETURN(Status_GcodeUnsupportedCommand);
+                    RETURN_DETAIL(Status_GcodeUnsupportedCommand, "Tool length apply additional offset not supported without a tool table");
                 break;
 
             default:
@@ -2878,7 +2906,7 @@ status_code_t gc_execute_block (char *block)
         mc_path_blend_flush();
         if(gc_block.modal.control == ControlMode_PathBlending) {
             if(gc_block.words.q)
-                RETURN(Status_GcodeUnsupportedCommand); // Q/Naive CAM is not implemented.
+                RETURN_DETAIL(Status_GcodeUnsupportedCommand, "Q/Naive CAM is not implemented"); // Q/Naive CAM is not implemented.
 
             if(gc_block.words.p) {
                 if(gc_block.values.p < 0.0f)
@@ -2892,7 +2920,7 @@ status_code_t gc_execute_block (char *block)
 
                 gc_state.path_tolerance = gc_block.values.p * (gc_block.modal.units_imperial ? MM_PER_INCH : 1.0f) * scale;
                 if(gc_state.path_tolerance > 100.0f)
-                    RETURN(Status_GcodeValueOutOfRange);
+                    RETURN_DETAIL(Status_GcodeValueOutOfRange, "Path tolerance too large");
             } else
                 gc_state.path_tolerance = settings_get_path_tolerance();
 
@@ -2944,15 +2972,15 @@ status_code_t gc_execute_block (char *block)
 
                 case 0:
                     if(grbl.tool_table.reload == NULL)
-                        RETURN(Status_GcodeUnsupportedCommand); // [G10 L0 not supported]
+                        RETURN_DETAIL(Status_GcodeUnsupportedCommand, "G10 L0 not supported"); // [G10 L0 not supported]
                     if(gc_state.tool->tool_id != 0)
-                        RETURN(Status_ToolInSPindle); // [G1 L0 can only be used when no tool is loaded]
+                        RETURN_DETAIL(Status_ToolInSPindle, "G10 L0 can only be used when no tool is loaded"); // [G1 L0 can only be used when no tool is loaded]
                     if((status_code_t)(int_value = grbl.tool_table.reload()) == Status_OK) {
                         tool_data_t *tool_data;
                         if((tool_data = grbl.tool_table.get_tool((tool_id_t)gc_state.tool->tool_id)->data))
                             memcpy(&gc_state.modal.tool_length_offset, tool_data->offset.values, sizeof(gc_state.modal.tool_length_offset));
                     } else
-                        RETURN((status_code_t)int_value);
+                        RETURN_DETAIL((status_code_t)int_value, "Tool table reload failed");
                     break;
 
 #ifdef __GNUC__
@@ -2962,7 +2990,7 @@ status_code_t gc_execute_block (char *block)
                 case 2:
 #ifndef ROTATION_ENABLE
                     if(gc_block.words.r)
-                        RETURN(Status_GcodeUnsupportedCommand); // [G10 L2 R not supported]
+                        RETURN_DETAIL(Status_GcodeUnsupportedCommand, "G10 L2 R not supported"); // [G10 L2 R not supported]
                     // no break
 #endif
                 case 20:;
@@ -3050,11 +3078,11 @@ status_code_t gc_execute_block (char *block)
                         if(gc_block.values.l == 1)
                             grbl.tool_table.set_tool(tool_data);
                     } else
-                        RETURN(Status_GcodeUnsupportedCommand);
+                        RETURN_DETAIL(Status_GcodeUnsupportedCommand, "Unsupported tool table command");
                     break;
 
                 default:
-                    RETURN(Status_GcodeUnsupportedCommand); // [Unsupported L]
+                    RETURN_DETAIL(Status_GcodeUnsupportedCommand, "Unsupported L command"); // [Unsupported L]
             }
             gc_block.words.l = gc_block.words.p = Off;
             break;
@@ -3080,10 +3108,10 @@ status_code_t gc_execute_block (char *block)
 #if ENABLE_ACCELERATION_PROFILES
         case NonModal_SetAccelerationProfile:
             if(gc_block.words.e)
-                RETURN(Status_GcodeUnsupportedCommand);
+                RETURN_DETAIL(Status_GcodeUnsupportedCommand, "Unsupported acceleration profile command with E word");
 
             if(gc_block.words.p && (gc_block.values.p < 1.0f || gc_block.values.p > 5.0f))
-                RETURN(Status_GcodeValueOutOfRange);
+                RETURN_DETAIL(Status_GcodeValueOutOfRange, "Acceleration profile P value out of range (1.0 - 5.0)");
 
             gc_state.modal.acceleration_factor = gc_get_accel_factor(gc_block.words.p ? (uint8_t)gc_block.values.p - 1 : 0);
             gc_block.words.p = Off;
@@ -3240,7 +3268,7 @@ status_code_t gc_execute_block (char *block)
             if(gc_block.modal.motion == MotionMode_SpindleSynchronized) {
 
                 if(!sspindle->hal->get_data)
-                    RETURN(Status_GcodeUnsupportedCommand); // [G33, G33.1]
+                    RETURN_DETAIL(Status_GcodeUnsupportedCommand, "G33, G33.1 not supported when spindle data is unavailable"); // [G33, G33.1]
 
                 if(gc_block.values.k == 0.0f)
                     RETURN(Status_GcodeValueOutOfRange); // [No distance (pitch) given]
@@ -3253,7 +3281,7 @@ status_code_t gc_execute_block (char *block)
                 // Fail if cutter radius comp is active
 
                 if(!sspindle->hal->get_data)
-                    RETURN(Status_GcodeUnsupportedCommand); // [G76 not supported]
+                    RETURN_DETAIL(Status_GcodeUnsupportedCommand, "G76 not supported when spindle data is unavailable"); // [G76 not supported]
 
                 if(gc_block.modal.plane_select != PlaneSelect_ZX)
                     RETURN(Status_GcodeIllegalPlane); // [Plane not ZX]
@@ -3406,7 +3434,7 @@ status_code_t gc_execute_block (char *block)
                     case MotionMode_CannedCycle84:
                         if(gc_block.modal.motion == MotionMode_CannedCycle84) {
                             if(!sspindle->hal->cap.at_speed)
-                                RETURN(Status_GcodeUnsupportedCommand);
+                                RETURN_DETAIL(Status_GcodeUnsupportedCommand, "Canned cycle 84 requires spindle at speed");
                             gc_state.canned.rapid_retract = Off;
                         }
                         if(gc_block.words.p) {
@@ -3829,7 +3857,7 @@ status_code_t gc_execute_block (char *block)
         if((status_code_t)(int_value = (uint_fast16_t)mc_jog_execute(&plan_data, &gc_block, gc_state.position)) == Status_OK)
             memcpy(gc_state.position, gc_block.values.xyz, sizeof(gc_state.position));
 
-        RETURN((status_code_t)int_value);
+        RETURN_DETAIL((status_code_t)int_value, "Jog command execution failed");
     }
 
     bool check_mode = state_get() == STATE_CHECK_MODE;
@@ -4060,7 +4088,7 @@ status_code_t gc_execute_block (char *block)
 #if NGC_EXPRESSIONS_ENABLE
                     if(!(macro_toolchange = (int_value == Status_Unhandled)))
 #endif
-                        RETURN((status_code_t)int_value);
+                        RETURN_DETAIL((status_code_t)int_value, "Automatic tool change failed");
                 }
                 report_add_realtime(Report_Tool);
             } else { // Manual
@@ -4688,7 +4716,7 @@ status_code_t gc_execute_block (char *block)
             if(check_mode) {
                 RETURN(macro_add((macro_id_t)gc_block.values.p, (line_number_t)gc_block.values.n, hal.stream.file));
             } else {
-                RETURN(macro_call((macro_id_t)gc_block.values.p, (line_number_t)gc_block.values.n, (parameter_words_t){ .$ = On}, gc_block.values.l));
+                RETURN_DETAIL(macro_call((macro_id_t)gc_block.values.p, (line_number_t)gc_block.values.n, (parameter_words_t){ .$ = On}, gc_block.values.l), "Failed to execute non-modal macro call 98");
             }
             break;
 
@@ -4796,7 +4824,7 @@ status_code_t gc_execute_block (char *block)
                 grbl.on_program_completed(gc_state.modal.program_flow, check_mode);
 
             // Clear any pending output commands etc...
-            gc_at_exit(hal.stream.state.m98_macro_prescan ? Status_Handled : Status_UserException);
+            gc_at_exit(hal.stream.state.m98_macro_prescan ? Status_Handled : Status_UserException, NULL);
 
 #if NGC_PARAMETERS_ENABLE
             ngc_modal_state_invalidate();
@@ -4817,5 +4845,5 @@ status_code_t gc_execute_block (char *block)
 
     // TODO: % to denote start of program.
 
-    return gc_at_exit(Status_OK);
+    return gc_at_exit(Status_OK, NULL);
 }

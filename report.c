@@ -51,7 +51,13 @@ static char buf[(STRLEN_COORDVALUE + 1) * N_AXIS];
 static char *(*get_axis_values)(float *axis_values);
 static char *(*get_axis_value)(float value);
 static char *(*get_rate_value)(float value);
+static const char *error_detail = NULL;
 static const char vbar[2] = { '|', '\0' };
+
+void report_set_error_detail (const char *detail)
+{
+    error_detail = detail;
+}
 
 #if defined(H743_MOSFET_PWM_ENABLE) && H743_MOSFET_PWM_ENABLE
 extern uint16_t h743_mosfet_pwm_get_relay_state (void);
@@ -252,8 +258,17 @@ FLASHMEM static status_code_t report_status_message (status_code_t status)
     if(hal.stream.is_connected()) {
         if(status == Status_OK)
             hal.stream.write("ok" ASCII_EOL);
-        else
-            hal.stream.write(appendbuf(3, "error:", uitoa((uint32_t)status), ASCII_EOL));
+        else {
+            hal.stream.write("error:");
+            hal.stream.write(uitoa((uint32_t)status));
+#if GCODE_ERROR_DETAILS_ENABLE
+            if(error_detail && *error_detail) {
+                hal.stream.write(" ");
+                hal.stream.write_all(error_detail);
+            }
+#endif
+            hal.stream.write(ASCII_EOL);
+        }
     }
 
     return status;
