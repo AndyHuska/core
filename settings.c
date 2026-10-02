@@ -47,6 +47,46 @@ extern void st_spindle_sync_cfg (settings_t *settings, settings_changed_flags_t 
 
 settings_t settings;
 
+#if ENABLE_PATH_BLENDING
+#define G64_TOLERANCE_STORAGE_MARKER 0xA5
+#define G64_TOLERANCE_MIN 0.0f
+#define G64_TOLERANCE_MAX 100.0f
+
+float settings_get_path_tolerance (void)
+{
+    float value;
+
+    if((uint8_t)settings.reserved[0] == G64_TOLERANCE_STORAGE_MARKER) {
+        memcpy(&value, &settings.reserved[1], sizeof(value));
+        if(isfinite(value) && value >= G64_TOLERANCE_MIN && value <= G64_TOLERANCE_MAX)
+            return value;
+    }
+
+    return DEFAULT_PATH_TOLERANCE;
+}
+
+static status_code_t set_g64_path_tolerance (setting_id_t setting, float value)
+{
+    if(!isfinite(value) || value < G64_TOLERANCE_MIN || value > G64_TOLERANCE_MAX)
+        return Status_SettingValueOutOfRange;
+
+    memcpy(&settings.reserved[1], &value, sizeof(value));
+    settings.reserved[0] = (char)G64_TOLERANCE_STORAGE_MARKER;
+
+    return Status_OK;
+}
+
+static float get_g64_path_tolerance (setting_id_t setting)
+{
+    return settings_get_path_tolerance();
+}
+#else
+float settings_get_path_tolerance (void)
+{
+    return DEFAULT_PATH_TOLERANCE;
+}
+#endif
+
 static const control_signals_t limits_override = { .limits_override = On };
 
 const settings_restore_t settings_all = {
@@ -2292,6 +2332,9 @@ PROGMEM static const setting_detail_t setting_detail[] = {
 #endif
      { Setting_JunctionDeviation, Group_General, "Junction deviation", "mm", Format_Decimal, "#####0.000", NULL, NULL, Setting_IsLegacy, &settings.junction_deviation, NULL, NULL },
      { Setting_ArcTolerance, Group_General, "Arc tolerance", "mm", Format_Decimal, "#####0.000", NULL, NULL, Setting_IsLegacy, &settings.arc_tolerance, NULL, NULL },
+#if ENABLE_PATH_BLENDING
+    { Setting_G64PathTolerance, Group_General, "G64 path tolerance", "mm", Format_Decimal, "#####0.0000", "0", "100", Setting_IsExtendedFn, set_g64_path_tolerance, get_g64_path_tolerance, NULL },
+#endif
      { Setting_ReportInches, Group_General, "Report in inches", NULL, Format_Bool, NULL, NULL, NULL, Setting_IsLegacyFn, set_report_inches, get_int, NULL },
      { Setting_ControlInvertMask, Group_ControlSignals, "Invert control inputs", NULL, Format_Bitfield, control_signals, NULL, NULL, Setting_IsExpandedFn, set_control_invert, get_int, is_setting_available },
      { Setting_CoolantInvertMask, Group_Coolant, "Invert coolant outputs", NULL, Format_Bitfield, coolant_signals, NULL, NULL, Setting_IsExtended, &settings.coolant.invert.mask, NULL, NULL },
@@ -2470,6 +2513,9 @@ PROGMEM static const setting_descr_t setting_descr[] = {
     },
     { Setting_JunctionDeviation, "Sets how fast grblHAL travels through consecutive motions. Lower value slows it down." },
     { Setting_ArcTolerance, "Sets the G2 and G3 arc tracing accuracy based on radial error. Beware: A very small value may effect performance." },
+#if ENABLE_PATH_BLENDING
+    { Setting_G64PathTolerance, "Sets the default maximum path deviation used by G64 when P is omitted. G64 P overrides this value." },
+#endif
     { Setting_ReportInches, "Enables inch units when returning any position and rate value that is not a settings value." },
     { Setting_ControlInvertMask, "Inverts the control signals (active low).\\n"
                                  "NOTE: Block delete, Optional stop, EStop and Probe connected are optional signals, availability is driver dependent."

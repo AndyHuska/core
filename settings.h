@@ -516,6 +516,7 @@ typedef enum {
     Setting_SpindleOffsetX       = 770,
     Setting_SpindleOffsetY       = 771,
     Setting_SpindleOffsetOptions = 772,
+    Setting_G64PathTolerance     = 780,
 //
 // 773-779 - reserved for spindle offset settings
 //
@@ -1107,6 +1108,7 @@ typedef struct setting_details {
 typedef setting_details_t *(*on_get_settings_ptr)(void);
 
 extern settings_t settings;
+float settings_get_path_tolerance (void);
 
 // Initialize the configuration subsystem (load settings from persistent storage)
 void settings_init();

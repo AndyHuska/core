@@ -113,6 +113,21 @@ static volatile bool exec_fast_hold = false;
 
 // Stepper timer ticks per minute
 static float cycles_per_min;
+#if ENABLE_PATH_BLENDING
+static void arc_get_position (planner_arc_t *arc, float fraction, float *position)
+{
+    float angle = arc->sweep * fraction;
+    float sine = sinf(angle), cosine = cosf(angle);
+    float tangent[3] = {
+        arc->normal[1] * arc->radial[2] - arc->normal[2] * arc->radial[1],
+        arc->normal[2] * arc->radial[0] - arc->normal[0] * arc->radial[2],
+        arc->normal[0] * arc->radial[1] - arc->normal[1] * arc->radial[0]
+    };
+
+    for(uint_fast8_t axis = 0; axis < 3; axis++)
+        position[axis] = arc->center[axis] + arc->radial[axis] * cosine + tangent[axis] * sine;
+}
+#endif
 
 static execution_entry_t *execution_find (line_number_t id)
 {
@@ -889,6 +904,43 @@ ISR_CODE void ISR_FUNC(stepper_driver_interrupt_handler)(void)
               #endif
             }
 
+#if ENABLE_PATH_BLENDING
+            if(st.exec_segment->arc_motion) {
+                axes_signals_t arc_dir_changed;
+                // OR in, so a change flagged by the new-block load above is not lost before output.
+                if((arc_dir_changed.bits = st.dir_out.bits ^ st.exec_segment->arc_direction.bits)) {
+                    st.dir_changed.bits |= arc_dir_changed.bits;
+                    st.dir_out = st.exec_segment->arc_direction;
+                }
+
+                st.step_event_count = st.exec_segment->arc_step_event_count;
+                st.counter.x = st.counter.y = st.counter.z
+#ifdef A_AXIS
+                  = st.counter.a
+#endif
+#ifdef B_AXIS
+                  = st.counter.b
+#endif
+#ifdef C_AXIS
+                  = st.counter.c
+#endif
+#ifdef U_AXIS
+                  = st.counter.u
+#endif
+#ifdef V_AXIS
+                  = st.counter.v
+#endif
+#ifdef W_AXIS
+                  = st.counter.w
+#endif
+                  = st.step_event_count >> 1;
+
+#if !ADAPTIVE_MULTI_AXIS_STEP_SMOOTHING
+                memcpy(&st.steps, &st.exec_segment->arc_steps, sizeof(st.steps));
+#endif
+            }
+#endif
+
 #if ADAPTIVE_MULTI_AXIS_STEP_SMOOTHING
 
             // With AMASS enabled, adjust Bresenham axis increment counters according to AMASS level.
@@ -897,7 +949,13 @@ ISR_CODE void ISR_FUNC(stepper_driver_interrupt_handler)(void)
             uint_fast8_t idx = N_AXIS;
             do {
                 idx--;
+#if ENABLE_PATH_BLENDING
+                st.steps.value[idx] = st.exec_segment->arc_motion
+                    ? st.exec_segment->arc_steps.value[idx] >> st.amass_level
+                    : st.exec_block->steps.value[idx] >> st.amass_level;
+#else
                 st.steps.value[idx] = st.exec_block->steps.value[idx] >> st.amass_level;
+#endif
             } while(idx);
 
 #endif
@@ -1313,6 +1371,9 @@ void st_prep_buffer (void)
                 st_prep_block->direction = pl_block->direction;
                 st_prep_block->programmed_rate = pl_block->programmed_rate;
                 st_prep_block->execution_id = pl_block->execution_id;
+#if ENABLE_PATH_BLENDING
+                st_prep_block->arc = pl_block->arc;
+#endif
 //                st_prep_block->r = pl_block->programmed_rate;
                 st_prep_block->millimeters = pl_block->millimeters;
                 st_prep_block->steps_per_mm = (float)pl_block->step_event_count / pl_block->millimeters;
@@ -1463,6 +1524,9 @@ void st_prep_buffer (void)
         // Set new segment to point to the current segment data block.
         prep_segment->exec_block = st_prep_block;
         prep_segment->block_end = false;
+    #if ENABLE_PATH_BLENDING
+        prep_segment->arc_motion = st_prep_block->arc.enabled;
+    #endif
         prep_segment->update_rpm = NULL;
         prep_segment->update_pwm = NULL;
 
@@ -1722,7 +1786,8 @@ void st_prep_buffer (void)
         float step_dist_remaining = prep.steps_per_mm * mm_remaining; // Convert mm_remaining to steps
         uint32_t n_steps_remaining = (uint32_t)ceilf(step_dist_remaining); // Round-up current steps remaining
 
-        prep_segment->n_step = (uint_fast16_t)(prep.steps_remaining - n_steps_remaining); // Compute number of steps to execute.
+    uint32_t path_step_count = prep.steps_remaining - n_steps_remaining;
+    prep_segment->n_step = (uint_fast16_t)path_step_count;
 
         // Bail if we are at the end of a feed hold and don't have a step to execute.
         if (prep_segment->n_step == 0 && sys.step_control.execute_hold) {
@@ -1745,6 +1810,54 @@ void st_prep_buffer (void)
         dt += prep.dt_remainder; // Apply previous segment partial step execute time
         float inv_rate = dt / ((float)prep.steps_remaining - step_dist_remaining); // Compute adjusted step rate inverse
 
+#if ENABLE_PATH_BLENDING
+        if(prep_segment->arc_motion) {
+            float start_fraction = 1.0f - ((float)prep.steps_remaining / (float)pl_block->step_event_count);
+            float end_fraction = 1.0f - ((float)n_steps_remaining / (float)pl_block->step_event_count);
+            float start_position[3], end_position[3];
+            int32_t start_steps[3], end_steps[3];
+            uint32_t max_step_count = 0;
+
+            arc_get_position(&pl_block->arc, start_fraction, start_position);
+            if(n_steps_remaining == 0)
+                memcpy(end_position, pl_block->target_mm, sizeof(end_position));
+            else
+                arc_get_position(&pl_block->arc, end_fraction, end_position);
+
+            for(uint_fast8_t axis = 0; axis < 3; axis++) {
+                start_steps[axis] = lroundf(start_position[axis] * settings.axis[axis].steps_per_mm);
+                end_steps[axis] = lroundf(end_position[axis] * settings.axis[axis].steps_per_mm);
+                int32_t delta = end_steps[axis] - start_steps[axis];
+                uint32_t steps = (uint32_t)labs(delta);
+                max_step_count = max(max_step_count, steps);
+                if(delta < 0)
+                    prep_segment->arc_direction.value |= bit(axis);
+                else
+                    prep_segment->arc_direction.value &= ~bit(axis);
+                prep_segment->arc_steps.value[axis] = steps;
+            }
+
+            for(uint_fast8_t axis = 3; axis < N_AXIS; axis++) {
+                prep_segment->arc_direction.value &= ~bit(axis);
+                prep_segment->arc_steps.value[axis] = 0;
+            }
+
+            prep_segment->n_step = (uint_fast16_t)max_step_count;
+#if ADAPTIVE_MULTI_AXIS_STEP_SMOOTHING
+            for(uint_fast8_t axis = 0; axis < N_AXIS; axis++)
+                prep_segment->arc_steps.value[axis] <<= MAX_AMASS_LEVEL;
+            prep_segment->arc_step_event_count = max_step_count << MAX_AMASS_LEVEL;
+#else
+            for(uint_fast8_t axis = 0; axis < N_AXIS; axis++)
+                prep_segment->arc_steps.value[axis] <<= 1;
+            prep_segment->arc_step_event_count = max_step_count << 1;
+#endif
+
+            if(max_step_count)
+                inv_rate = dt / (float)max_step_count;
+        }
+#endif
+
         // Compute timer ticks per step for the prepped segment.
         uint32_t cycles = (uint32_t)ceilf(cycles_per_min * inv_rate); // (cycles/step)
 
@@ -1763,6 +1876,12 @@ if(jlog.idx < sizeof(jlog.data) - 1 && prep.ramp_type != Ramp_Cruise) {
     jlog.data[jlog.idx].time = cycles;
     jlog.idx++;
 }
+#endif
+
+#if ENABLE_PATH_BLENDING
+        if(prep_segment->arc_motion) {
+            prep_segment->arc_motion = true;
+        }
 #endif
 
 #if ADAPTIVE_MULTI_AXIS_STEP_SMOOTHING

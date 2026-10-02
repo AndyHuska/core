@@ -73,6 +73,234 @@ void mc_sync_backlash_position (void)
 
 #endif
 
+#if ENABLE_PATH_BLENDING
+typedef struct {
+    bool valid;
+    float start[N_AXIS];
+    float target[N_AXIS];
+    plan_line_data_t data;
+} blend_candidate_t;
+
+static blend_candidate_t blend_pending;
+static bool blend_emitting = false;
+
+static bool blend_flush_pending (void);
+static bool blend_store_candidate (float *target, plan_line_data_t *pl_data, float *start);
+static bool blend_resolve_corner (float *target, plan_line_data_t *pl_data);
+
+static bool blend_xyz_only (float *start, float *target)
+{
+    for(uint_fast8_t axis = 3; axis < N_AXIS; axis++)
+        if(fabsf(start[axis] - target[axis]) > 0.0001f)
+            return false;
+
+    return true;
+}
+
+static bool blend_store_candidate (float *target, plan_line_data_t *pl_data, float *start)
+{
+    if(!blend_xyz_only(start, target))
+        return false;
+
+    memset(&blend_pending, 0, sizeof(blend_pending));
+    blend_pending.valid = true;
+    memcpy(blend_pending.start, start, sizeof(float) * N_AXIS);
+    memcpy(blend_pending.target, target, sizeof(float) * N_AXIS);
+    memcpy(&blend_pending.data, pl_data, sizeof(plan_line_data_t));
+
+    // Hold the execution ID open until the deferred remainder is planned.
+    st_execution_effect_queued(blend_pending.data.execution_id);
+
+    pl_data->message = NULL;
+    pl_data->output_commands = NULL;
+    return true;
+}
+
+static bool blend_flush_pending (void)
+{
+    bool ok;
+
+    if(!blend_pending.valid)
+        return true;
+
+    blend_pending.valid = false;
+    blend_emitting = true;
+    ok = mc_line(blend_pending.target, &blend_pending.data);
+    blend_emitting = false;
+    st_execution_complete(blend_pending.data.execution_id);
+
+    return ok;
+}
+
+static void blend_copy_data (plan_line_data_t *dst, const plan_line_data_t *src, line_number_t id)
+{
+    memcpy(dst, src, sizeof(plan_line_data_t));
+    dst->execution_id = id;
+    dst->message = NULL;
+    dst->output_commands = NULL;
+    dst->arc = (planner_arc_t){0};
+    dst->path_blend_candidate = false;
+}
+
+static bool blend_resolve_corner (float *target, plan_line_data_t *pl_data)
+{
+    float *a = blend_pending.start, *b = blend_pending.target, *c = target;
+    float in[3], out[3], bisector[3], radial1[3];
+    float len_in = 0.0f, len_out = 0.0f, dot, theta, sin_half, radius, trim, max_trim;
+    float p1[N_AXIS], pmid[N_AXIS], p2[N_AXIS];
+    float targets[3][N_AXIS];
+    plan_line_data_t data[3];
+    float normal[3], center[3];
+    memset(p1, 0, sizeof(p1));
+    memset(pmid, 0, sizeof(pmid));
+    memset(p2, 0, sizeof(p2));
+
+    if(!blend_pending.valid || pl_data->path_tolerance <= 0.0f || pl_data->exact_stop ||
+       !blend_xyz_only(a, b) || !blend_xyz_only(b, c))
+        return false;
+
+    for(uint_fast8_t axis = 0; axis < 3; axis++) {
+        in[axis] = b[axis] - a[axis];
+        out[axis] = c[axis] - b[axis];
+        len_in += in[axis] * in[axis];
+        len_out += out[axis] * out[axis];
+    }
+
+    len_in = sqrtf(len_in);
+    len_out = sqrtf(len_out);
+    if(len_in <= 0.0f || len_out <= 0.0f)
+        return false;
+
+    for(uint_fast8_t axis = 0; axis < 3; axis++) {
+        in[axis] /= len_in;
+        out[axis] /= len_out;
+        bisector[axis] = out[axis] - in[axis];
+    }
+
+    dot = constrain(-in[0] * out[0] - in[1] * out[1] - in[2] * out[2], -1.0f, 1.0f);
+    theta = acosf(dot);
+    sin_half = sinf(theta * 0.5f);
+    if(theta < 0.001f || theta > (float)M_PI - 0.001f || sin_half <= 0.0f)
+        return false;
+
+    float bisector_length = sqrtf(bisector[0] * bisector[0] + bisector[1] * bisector[1] + bisector[2] * bisector[2]);
+    if(bisector_length <= 0.000001f)
+        return false;
+    for(uint_fast8_t axis = 0; axis < 3; axis++)
+        bisector[axis] /= bisector_length;
+    radius = pl_data->path_tolerance / (1.0f / sin_half - 1.0f);
+    trim = radius / tanf(theta * 0.5f);
+    max_trim = min(len_in, len_out) * 0.5f;
+    if(trim > max_trim) {
+        trim = max_trim;
+        radius = trim * tanf(theta * 0.5f);
+    }
+    if(radius <= 0.0f || trim <= 0.0f)
+        return false;
+
+    for(uint_fast8_t axis = 0; axis < 3; axis++) {
+        p1[axis] = b[axis] - in[axis] * trim;
+        p2[axis] = b[axis] + out[axis] * trim;
+        center[axis] = b[axis] + bisector[axis] * radius / sin_half;
+        radial1[axis] = p1[axis] - center[axis];
+        normal[axis] = 0.0f;
+    }
+
+    normal[0] = in[1] * out[2] - in[2] * out[1];
+    normal[1] = in[2] * out[0] - in[0] * out[2];
+    normal[2] = in[0] * out[1] - in[1] * out[0];
+    float normal_length = sqrtf(normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]);
+    if(normal_length <= 0.000001f)
+        return false;
+    for(uint_fast8_t axis = 0; axis < 3; axis++)
+        normal[axis] /= normal_length;
+
+    float radial_end[3] = { p2[0] - center[0], p2[1] - center[1], p2[2] - center[2] };
+    float cross[3] = {
+        radial1[1] * radial_end[2] - radial1[2] * radial_end[1],
+        radial1[2] * radial_end[0] - radial1[0] * radial_end[2],
+        radial1[0] * radial_end[1] - radial1[1] * radial_end[0]
+    };
+    float sweep = atan2f(cross[0] * normal[0] + cross[1] * normal[1] + cross[2] * normal[2],
+                         radial1[0] * radial_end[0] + radial1[1] * radial_end[1] + radial1[2] * radial_end[2]);
+    if(fabsf(sweep) < 0.001f)
+        return false;
+
+    float half_sweep = sweep * 0.5f;
+    float sine = sinf(half_sweep), cosine = cosf(half_sweep);
+    float tangent[3] = {
+        normal[1] * radial1[2] - normal[2] * radial1[1],
+        normal[2] * radial1[0] - normal[0] * radial1[2],
+        normal[0] * radial1[1] - normal[1] * radial1[0]
+    };
+    for(uint_fast8_t axis = 0; axis < 3; axis++)
+        pmid[axis] = center[axis] + radial1[axis] * cosine + tangent[axis] * sine;
+
+    memcpy(targets[0], p1, sizeof(float) * N_AXIS);
+    memcpy(targets[1], pmid, sizeof(float) * N_AXIS);
+    memcpy(targets[2], p2, sizeof(float) * N_AXIS);
+
+    blend_copy_data(&data[0], &blend_pending.data, blend_pending.data.execution_id);
+    blend_copy_data(&data[1], &blend_pending.data, blend_pending.data.execution_id);
+
+    blend_copy_data(&data[2], pl_data, pl_data->execution_id);
+
+    data[0].output_commands = blend_pending.data.output_commands;
+    data[0].message = blend_pending.data.message;
+
+    data[0].arc.enabled = false;
+    data[1].arc = (planner_arc_t){ .enabled = true, .center = { center[0], center[1], center[2] },
+        .radial = { radial1[0], radial1[1], radial1[2] }, .normal = { normal[0], normal[1], normal[2] },
+        .sweep = half_sweep, .radius = radius };
+    data[2].arc = data[1].arc;
+    data[2].arc.radial[0] = pmid[0] - center[0];
+    data[2].arc.radial[1] = pmid[1] - center[1];
+    data[2].arc.radial[2] = pmid[2] - center[2];
+    data[2].output_commands = pl_data->output_commands;
+    data[2].message = pl_data->message;
+    pl_data->output_commands = NULL;
+    pl_data->message = NULL;
+
+    blend_emitting = true;
+    bool ok = plan_buffer_batch(targets, data, 3);
+    blend_emitting = false;
+    if(ok) {
+        st_execution_complete(blend_pending.data.execution_id);
+        blend_pending.valid = false;
+
+        memcpy(&blend_pending.data, pl_data, sizeof(plan_line_data_t));
+        blend_pending.data.output_commands = NULL;
+        blend_pending.data.message = NULL;
+        memcpy(blend_pending.start, p2, sizeof(float) * N_AXIS);
+        memcpy(blend_pending.target, c, sizeof(float) * N_AXIS);
+        blend_pending.valid = true;
+        st_execution_effect_queued(blend_pending.data.execution_id);
+        return true;
+    }
+
+    blend_flush_pending();
+    return false;
+}
+
+void mc_path_blend_flush (void)
+{
+    blend_flush_pending();
+}
+
+void mc_path_blend_cancel (void)
+{
+    if(blend_pending.valid) {
+        if(blend_pending.data.execution_id)
+            st_execution_cancel(blend_pending.data.execution_id);
+        if(blend_pending.data.output_commands)
+            gc_clear_output_commands(blend_pending.data.output_commands);
+        if(blend_pending.data.message)
+            free(blend_pending.data.message);
+    }
+    blend_pending.valid = false;
+}
+#endif
+
 // Execute linear motion in absolute millimeter coordinates. Feed rate given in millimeters/second
 // unless invert_feed_rate is true. Then the feed_rate means that the motion should be completed in
 // (1 minute)/feed_rate time.
@@ -92,6 +320,26 @@ bool mc_line (float *target, plan_line_data_t *pl_data)
     // from everywhere in grblHAL.
     if(!(pl_data->condition.target_validated && pl_data->condition.target_valid))
         limits_soft_check(target, pl_data->condition);
+
+#if ENABLE_PATH_BLENDING
+     if(!blend_emitting && state_get() != STATE_CHECK_MODE && !pl_data->condition.system_motion &&
+         !pl_data->condition.jog_motion && !pl_data->condition.rapid_motion && pl_data->path_blend_candidate &&
+         pl_data->path_tolerance > 0.0f) {
+        float start[N_AXIS];
+        memcpy(start, plan_get_position(), sizeof(start));
+
+        if(blend_pending.valid) {
+            if(blend_resolve_corner(target, pl_data))
+                return true;
+            blend_flush_pending();
+            memcpy(start, plan_get_position(), sizeof(start));
+        }
+
+        if(blend_store_candidate(target, pl_data, start))
+            return true;
+    } else if(!blend_emitting)
+        blend_flush_pending();
+#endif
 
     // If in check gcode mode, prevent motion by blocking planner. Soft limits still work.
     if(state_get() != STATE_CHECK_MODE && protocol_execute_realtime()) {
@@ -831,6 +1079,9 @@ FLASHMEM status_code_t mc_jog_execute (plan_line_data_t *pl_data, parser_block_t
 FLASHMEM void mc_dwell (float seconds, line_number_t execution_id)
 {
     if (state_get() != STATE_CHECK_MODE) {
+#if ENABLE_PATH_BLENDING
+        mc_path_blend_flush();
+#endif
         protocol_buffer_synchronize();
         if(execution_id)
             st_execution_set_active(execution_id);
@@ -1163,6 +1414,9 @@ FLASHMEM void mc_override_ctrl_update (gc_override_flags_t override_state)
 // realtime abort command and hard limits. So, keep to a minimum.
 ISR_CODE void ISR_FUNC(mc_reset)(void)
 {
+#if ENABLE_PATH_BLENDING
+    mc_path_blend_cancel();
+#endif
     // Only this function can set the system reset. Helps prevent multiple kill calls.
     if(bit_isfalse(sys.rt_exec_state, EXEC_RESET)) {
 

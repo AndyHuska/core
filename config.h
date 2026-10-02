@@ -202,7 +202,13 @@ or EMI triggering the related interrupt falsely or too many times.
 
 // EXPERIMENTAL OPTIONS
 
-#define ENABLE_PATH_BLENDING Off // Do NOT enable unless working on adding this feature!
+#if !defined ENABLE_PATH_BLENDING || defined __DOXYGEN__
+#define ENABLE_PATH_BLENDING Off // Enable G61/G61.1/G64 path control and blending.
+#endif
+
+#if !defined DEFAULT_PATH_TOLERANCE || defined __DOXYGEN__
+#define DEFAULT_PATH_TOLERANCE 0.01f // Default G64 maximum path deviation in mm.
+#endif
 
 #if !defined ENABLE_ACCELERATION_PROFILES || defined __DOXYGEN__
 #define ENABLE_ACCELERATION_PROFILES Off // Enable to allow G-Code changeable acceleration profiles.

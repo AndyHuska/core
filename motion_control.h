@@ -56,6 +56,8 @@ status_code_t mc_jog_execute(plan_line_data_t *pl_data, parser_block_t *gc_block
 
 // Dwell for a specific number of seconds
 void mc_dwell(float seconds, line_number_t execution_id);
+void mc_path_blend_flush (void);
+void mc_path_blend_cancel (void);
 
 // Perform homing cycle to locate machine zero. Requires limit switches.
 status_code_t mc_homing_cycle(axes_signals_t cycle);

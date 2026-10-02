@@ -76,6 +76,17 @@ typedef union {
     };
 } steps_t;
 
+#if ENABLE_PATH_BLENDING
+typedef struct {
+    bool enabled;
+    float center[3];
+    float radial[3];
+    float normal[3];
+    float sweep;
+    float radius;
+} planner_arc_t;
+#endif
+
 // This struct stores a linear movement of a g-code block motion with its critical "nominal" values
 // are as specified in the source g-code.
 typedef struct plan_block {
@@ -91,6 +102,10 @@ typedef struct plan_block {
     planner_cond_t condition;       // Block bitfield variable defining block run conditions. Copied from pl_line_data.
     line_number_t line_number;      // Block line number for real-time reporting. Copied from pl_line_data.
     line_number_t execution_id;     // Explicit host N word; zero when untagged.
+#if ENABLE_PATH_BLENDING
+    bool exact_stop;                // G61.1 forces zero speed at this programmed boundary.
+    planner_arc_t arc;
+#endif
     float target_mm[N_AXIS];        // Block target end location in mm for real-time reporting of distance to go.
 
     // Fields used by the motion planner to manage acceleration. Some of these values may be updated
@@ -150,6 +165,11 @@ typedef struct {
     offset_id_t offset_id;
     line_number_t line_number;      // Desired line number to report when executing.
     line_number_t execution_id;     // Explicit host N word; zero when untagged.
+#if ENABLE_PATH_BLENDING
+    bool exact_stop;
+    planner_arc_t arc;
+    bool path_blend_candidate;
+#endif
 //    void *parameters;               // TODO: pointer to extra parameters, for canned cycles and threading?
     char *message;                  // Message to be displayed when block is executed.
     output_command_t *output_commands;
@@ -179,6 +199,10 @@ uint_fast16_t plan_get_buffer_size (void);
 // in millimeters. Feed rate specifies the speed of the motion. If feed rate is inverted, the feed
 // rate is taken to mean "frequency" and would complete the operation in 1/feed_rate minutes.
 bool plan_buffer_line (float *target, plan_line_data_t *pl_data);
+
+#if ENABLE_PATH_BLENDING
+bool plan_buffer_batch (float (*targets)[N_AXIS], plan_line_data_t *pl_data, uint_fast8_t count);
+#endif
 
 // Called when the current block is no longer needed. Discards the block and makes the memory
 // available for new blocks.

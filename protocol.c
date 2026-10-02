@@ -346,6 +346,11 @@ bool protocol_main_loop (void)
         // If there are no more characters in the input stream buffer to be processed and executed,
         // this indicates that g-code streaming has either filled the planner buffer or has
         // completed. In either case, auto-cycle start, if enabled, any queued moves.
+#if ENABLE_PATH_BLENDING
+        // Nothing left to blend into once the planner has drained, so release the held G64 segment.
+        if(char_counter == 0 && plan_get_current_block() == NULL)
+            mc_path_blend_flush();
+#endif
         protocol_auto_cycle_start();
 
         if(!protocol_execute_realtime() && sys.abort) // Runtime command check point.
@@ -364,6 +369,9 @@ bool protocol_main_loop (void)
 // during a synchronize call, if it should happen. Also, waits for clean cycle end.
 bool protocol_buffer_synchronize (void)
 {
+#if ENABLE_PATH_BLENDING
+    mc_path_blend_flush();
+#endif
     bool ok = true;
 
     // If system is queued, ensure cycle resumes if the auto start flag is present.

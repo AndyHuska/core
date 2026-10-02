@@ -53,6 +53,9 @@ typedef struct st_block {
     float millimeters;
     float programmed_rate;
     line_number_t execution_id;
+#if ENABLE_PATH_BLENDING
+    planner_arc_t arc;
+#endif
     char *message;                     //!< Message to be displayed when block is executed
     output_command_t *output_commands; //!< Output commands (linked list) to be performed when block is executed
     output_command_t *output_commands_to_free;
@@ -73,6 +76,12 @@ typedef struct st_segment {
     float target_position;              //!< Target position of segment relative to block start, used by spindle sync code
     uint_fast16_t n_step;               //!< Number of step events to be executed for this segment
     bool block_end;                     //!< True when this segment ends its planner block normally
+#if ENABLE_PATH_BLENDING
+    bool arc_motion;
+    steps_t arc_steps;
+    uint32_t arc_step_event_count;
+    axes_signals_t arc_direction;
+#endif
     uint_fast16_t spindle_pwm;          //!< Spindle PWM to be set at the start of segment execution
     float spindle_rpm;                  //!< Spindle RPM to be set at the start of the segment execution
     ramp_type_t ramp_type;              //!< Segment ramp type

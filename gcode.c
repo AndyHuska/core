@@ -28,6 +28,7 @@
 #include "hal.h"
 #include "motion_control.h"
 #include "protocol.h"
+#include "settings.h"
 #include "stepper.h"
 #include "state_machine.h"
 
@@ -723,6 +724,11 @@ FLASHMEM static status_code_t macro_call (macro_id_t macro, line_number_t line_n
 
 static status_code_t gc_at_exit (status_code_t status)
 {
+#if ENABLE_PATH_BLENDING
+    if(status != Status_OK && status != Status_Handled)
+        mc_path_blend_flush();
+#endif
+
     if(current_execution_id) {
         if(status == Status_OK || status == Status_Handled)
             st_execution_close(current_execution_id);
@@ -1664,7 +1670,7 @@ status_code_t gc_execute_block (char *block)
 #if ENABLE_PATH_BLENDING
                     case 61:
                         word_bit.modal_group.G13 = On;
-                        if (mantissa != 0 || mantissa != 10)
+                        if (mantissa != 0 && mantissa != 10)
                             RETURN(Status_GcodeUnsupportedCommand);
                         gc_block.modal.control = mantissa == 0 ? ControlMode_ExactPath : ControlMode_ExactStop;
                         break;
@@ -2869,10 +2875,29 @@ status_code_t gc_execute_block (char *block)
     // [16. Set path control mode ]: N/A. Only G61. G61.1 and G64 NOT SUPPORTED.
 #if ENABLE_PATH_BLENDING
     if(command_words.G13) { // Check if called in block
+        mc_path_blend_flush();
         if(gc_block.modal.control == ControlMode_PathBlending) {
-            gc_state.path_tolerance = gc_block.words.p ? gc_block.values.p : 0.0f;
-            gc_state.cam_tolerance = gc_block.words.q ? gc_block.values.q : 0.0f;
-            gc_block.words.p = gc_block.words.q = Off;
+            if(gc_block.words.q)
+                RETURN(Status_GcodeUnsupportedCommand); // Q/Naive CAM is not implemented.
+
+            if(gc_block.words.p) {
+                if(gc_block.values.p < 0.0f)
+                    RETURN(Status_NegativeValue);
+
+                float scale = 1.0f;
+                if(gc_block.modal.scaling_active) {
+                    scale = max(fabsf(scale_factor.ijk[X_AXIS]), fabsf(scale_factor.ijk[Y_AXIS]));
+                    scale = max(scale, fabsf(scale_factor.ijk[Z_AXIS]));
+                }
+
+                gc_state.path_tolerance = gc_block.values.p * (gc_block.modal.units_imperial ? MM_PER_INCH : 1.0f) * scale;
+                if(gc_state.path_tolerance > 100.0f)
+                    RETURN(Status_GcodeValueOutOfRange);
+            } else
+                gc_state.path_tolerance = settings_get_path_tolerance();
+
+            gc_state.cam_tolerance = 0.0f;
+            gc_block.words.p = Off;
         } else
             gc_state.path_tolerance = gc_state.cam_tolerance = 0.0f;
     }
@@ -3860,6 +3885,9 @@ status_code_t gc_execute_block (char *block)
     // NOTE: If no line number is present, the value is zero.
     plan_data.line_number = gc_state.line_number = (line_number_t)gc_block.values.n; // Record data for planner use.
     plan_data.execution_id = execution_id;
+#if ENABLE_PATH_BLENDING
+    plan_data.exact_stop = gc_block.modal.control == ControlMode_ExactStop;
+#endif
     gc_block.output_command.execution_id = execution_id;
     current_execution_id = execution_id;
     st_execution_begin(execution_id);
@@ -4465,11 +4493,17 @@ status_code_t gc_execute_block (char *block)
 
     if(gc_state.modal.motion != MotionMode_None && axis_command == AxisCommand_MotionMode) {
 
+#if ENABLE_PATH_BLENDING
+    if(gc_state.modal.motion != MotionMode_Linear)
+        mc_path_blend_flush();
+#endif
+
         plan_data.output_commands = output_commands;
         plan_data.condition.no_feed_override = gc_state.modal.override_ctrl.feed_rates_disable;
 #if ENABLE_PATH_BLENDING
         plan_data.cam_tolerance = gc_state.cam_tolerance;
         plan_data.path_tolerance = gc_state.path_tolerance;
+        plan_data.path_blend_candidate = gc_state.modal.motion == MotionMode_Linear;
 #endif
 #if PLANNER_ADD_MOTION_MODE
         plan_data.motion_mode = gc_state.modal.motion;

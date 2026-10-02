@@ -51,6 +51,7 @@ typedef struct {
 
 static planner_t pl;
 static block_buffer_t block_buffer;
+static bool plan_batch_active = false;
 
 /*                            PLANNER SPEED DEFINITION
                                      +--------+   <- current->nominal_speed
@@ -410,6 +411,9 @@ bool plan_buffer_line (float *target, plan_line_data_t *pl_data)
     int32_t target_steps[N_AXIS], position_steps[N_AXIS], delta_steps;
     uint_fast8_t idx;
     float unit_vec[N_AXIS];
+#if ENABLE_PATH_BLENDING
+    float end_unit_vec[N_AXIS];
+#endif
 #if N_AXIS > 3 && ROTARY_FIX
     axes_signals_t motion = {0};
 #endif
@@ -421,6 +425,10 @@ bool plan_buffer_line (float *target, plan_line_data_t *pl_data)
     block->overrides = pl_data->overrides;
     block->line_number = pl_data->line_number;
     block->execution_id = pl_data->execution_id;
+    #if ENABLE_PATH_BLENDING
+        block->exact_stop = pl_data->exact_stop;
+        block->arc = pl_data->arc;
+    #endif
     block->offset_id = pl_data->offset_id;
     block->output_commands = pl_data->output_commands;
     block->message = pl_data->message;
@@ -463,6 +471,47 @@ bool plan_buffer_line (float *target, plan_line_data_t *pl_data)
 
     block->direction = direction;
 
+#if ENABLE_PATH_BLENDING
+    if(block->arc.enabled) {
+        float tangent[3] = {
+            block->arc.normal[1] * block->arc.radial[2] - block->arc.normal[2] * block->arc.radial[1],
+            block->arc.normal[2] * block->arc.radial[0] - block->arc.normal[0] * block->arc.radial[2],
+            block->arc.normal[0] * block->arc.radial[1] - block->arc.normal[1] * block->arc.radial[0]
+        };
+        float end_angle = block->arc.sweep;
+        float sine = sinf(end_angle), cosine = cosf(end_angle);
+        float end_radial[3], end_tangent[3];
+
+        for(idx = 0; idx < 3; idx++)
+            end_radial[idx] = block->arc.radial[idx] * cosine + tangent[idx] * sine;
+
+        end_tangent[0] = block->arc.normal[1] * end_radial[2] - block->arc.normal[2] * end_radial[1];
+        end_tangent[1] = block->arc.normal[2] * end_radial[0] - block->arc.normal[0] * end_radial[2];
+        end_tangent[2] = block->arc.normal[0] * end_radial[1] - block->arc.normal[1] * end_radial[0];
+
+        if(block->arc.sweep < 0.0f) {
+            for(idx = 0; idx < 3; idx++) {
+                tangent[idx] = -tangent[idx];
+                end_tangent[idx] = -end_tangent[idx];
+            }
+        }
+
+        float tangent_length = sqrtf(tangent[0] * tangent[0] + tangent[1] * tangent[1] + tangent[2] * tangent[2]);
+        float end_tangent_length = sqrtf(end_tangent[0] * end_tangent[0] + end_tangent[1] * end_tangent[1] + end_tangent[2] * end_tangent[2]);
+        if(tangent_length > 0.000001f && end_tangent_length > 0.000001f) {
+            for(idx = 0; idx < 3; idx++) {
+                tangent[idx] /= tangent_length;
+                end_tangent[idx] /= end_tangent_length;
+            }
+        }
+
+        memset(unit_vec, 0, sizeof(unit_vec));
+        memset(end_unit_vec, 0, sizeof(end_unit_vec));
+        memcpy(unit_vec, tangent, sizeof(tangent));
+        memcpy(end_unit_vec, end_tangent, sizeof(end_tangent));
+    }
+#endif
+
     // Calculate RPMs to be used for Constant Surface Speed (CSS) calculations.
     if(block->spindle.css) {
 
@@ -484,9 +533,17 @@ bool plan_buffer_line (float *target, plan_line_data_t *pl_data)
     }
 
     // Bail if this is a zero-length block. Highly unlikely to occur.
-    if(block->step_event_count == 0)
+    if(block->step_event_count == 0
+#if ENABLE_PATH_BLENDING
+       && !block->arc.enabled
+#endif
+    ) {
+        if(pl_data->execution_id) {
+            st_execution_effect_queued(pl_data->execution_id);
+            st_execution_complete(pl_data->execution_id);
+        }
         return false;
-    else {
+    } else {
         pl_data->message = NULL;         // Indicate message is already queued for display on execution
         pl_data->output_commands = NULL; // Indicate commands are already queued for execution
     }
@@ -532,6 +589,10 @@ bool plan_buffer_line (float *target, plan_line_data_t *pl_data)
 #endif
 
     block->millimeters = convert_delta_vector_to_unit_vector(unit_vec);
+#if ENABLE_PATH_BLENDING
+    if(block->arc.enabled)
+        block->millimeters = block->arc.radius * fabsf(block->arc.sweep);
+#endif
 #if ENABLE_ACCELERATION_PROFILES // recalculate the acceleration limits when enabled.
 //    block->acceleration_factor = pl_data->acceleration_factor;
 #endif
@@ -552,6 +613,21 @@ bool plan_buffer_line (float *target, plan_line_data_t *pl_data)
 #endif
     }
     block->rapid_rate = limit_max_rate_by_axis_maximum(unit_vec);
+#if ENABLE_PATH_BLENDING
+    if(block->arc.enabled) {
+        float min_rate = min(settings.axis[X_AXIS].max_rate, min(settings.axis[Y_AXIS].max_rate, settings.axis[Z_AXIS].max_rate));
+        float min_accel = min(settings.axis[X_AXIS].acceleration, min(settings.axis[Y_AXIS].acceleration, settings.axis[Z_AXIS].acceleration));
+        float centripetal_rate = sqrtf(min_accel * block->arc.radius * 0.5f);
+
+        block->rapid_rate = min(block->rapid_rate, min(min_rate, centripetal_rate));
+        block->acceleration = min(block->acceleration, min_accel * 0.5f);
+#if ENABLE_JERK_ACCELERATION
+        block->max_acceleration = min(block->max_acceleration, min_accel * 0.5f);
+#endif
+        block->step_event_count = max(1.0f, ceilf(block->millimeters * max(settings.axis[X_AXIS].steps_per_mm,
+                                            max(settings.axis[Y_AXIS].steps_per_mm, settings.axis[Z_AXIS].steps_per_mm))));
+    }
+#endif
 #ifdef KINEMATICS_API
     block->rate_multiplier = pl_data->rate_multiplier;
 #endif
@@ -564,6 +640,10 @@ bool plan_buffer_line (float *target, plan_line_data_t *pl_data)
         if (block->condition.inverse_time)
             block->programmed_rate *= block->millimeters;
     }
+#if ENABLE_PATH_BLENDING
+    if(block->arc.enabled)
+        block->programmed_rate = min(block->programmed_rate, block->rapid_rate);
+#endif
 
 #if ENABLE_JERK_ACCELERATION
 
@@ -643,6 +723,11 @@ bool plan_buffer_line (float *target, plan_line_data_t *pl_data)
             block->max_junction_speed_sqr = max(MINIMUM_JUNCTION_SPEED * MINIMUM_JUNCTION_SPEED,
                                                   (junction_acceleration * settings.junction_deviation * sin_theta_d2) / (1.0f - sin_theta_d2));
         }
+
+#if ENABLE_PATH_BLENDING
+        if(block->exact_stop || block->prev->exact_stop)
+            block->max_junction_speed_sqr = 0.0f;
+#endif
     }
 
     // Block system motion from updating this data to ensure next g-code motion is computed correctly.
@@ -652,7 +737,11 @@ bool plan_buffer_line (float *target, plan_line_data_t *pl_data)
 
         if(!block->condition.backlash_motion) {
             // Update previous path unit_vector and planner position.
+#if ENABLE_PATH_BLENDING
+            memcpy(pl.previous_unit_vec, block->arc.enabled ? end_unit_vec : unit_vec, sizeof(unit_vec));
+#else
             memcpy(pl.previous_unit_vec, unit_vec, sizeof(unit_vec)); // pl.previous_unit_vec[] = unit_vec[]
+#endif
             memcpy(pl.position, target_steps, sizeof(target_steps)); // pl.position[] = target_steps[]
         }
         // New block is all set. Update buffer head and next buffer head indices.
@@ -660,13 +749,60 @@ bool plan_buffer_line (float *target, plan_line_data_t *pl_data)
         block_buffer.next_head = block_buffer.head->next;
 
         // Finish up by recalculating the plan with the new block.
-        planner_recalculate();
+        if(!plan_batch_active)
+            planner_recalculate();
     }
 
     st_execution_effect_queued(block->execution_id);
     return true;
 }
 
+#if ENABLE_PATH_BLENDING
+bool plan_buffer_batch (float (*targets)[N_AXIS], plan_line_data_t *pl_data, uint_fast8_t count)
+{
+    int32_t position[N_AXIS], target_steps[N_AXIS];
+
+    if(targets == NULL || pl_data == NULL || count == 0 || count > plan_get_block_buffer_available() || plan_batch_active)
+        return false;
+
+    memcpy(position, pl.position, sizeof(position));
+
+    for(uint_fast8_t block = 0; block < count; block++) {
+        if(pl_data[block].condition.system_motion)
+            return false;
+
+        if(pl_data[block].arc.enabled) {
+            if(pl_data[block].arc.radius <= 0.0f || pl_data[block].arc.sweep == 0.0f)
+                return false;
+        } else {
+            bool has_steps = false;
+            for(uint_fast8_t axis = 0; axis < N_AXIS; axis++) {
+                target_steps[axis] = lroundf(targets[block][axis] * settings.axis[axis].steps_per_mm);
+                has_steps |= target_steps[axis] != position[axis];
+            }
+            if(!has_steps)
+                return false;
+        }
+
+        for(uint_fast8_t axis = 0; axis < N_AXIS; axis++)
+            position[axis] = lroundf(targets[block][axis] * settings.axis[axis].steps_per_mm);
+    }
+
+    plan_batch_active = true;
+
+    for(uint_fast8_t block = 0; block < count; block++) {
+        if(!plan_buffer_line(targets[block], &pl_data[block])) {
+            plan_batch_active = false;
+            return false;
+        }
+    }
+
+    plan_batch_active = false;
+    planner_recalculate();
+
+    return true;
+}
+#endif
 
 // Get the planner position vectors.
 float *plan_get_position (void)
