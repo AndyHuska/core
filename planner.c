@@ -838,6 +838,22 @@ uint_fast16_t plan_get_block_buffer_available (void)
                             : ((block_buffer.tail - block_buffer.head) - 1));
 }
 
+#if ENABLE_PATH_BLENDING
+// Lower bound: assumes every block runs at its nominal speed and ignores already prepared step segments.
+uint32_t plan_get_queued_time_ms (void)
+{
+    float minutes = 0.0f;
+    plan_block_t *block = block_buffer.tail;
+
+    while(block != block_buffer.head) {
+        minutes += block->millimeters / plan_compute_profile_nominal_speed(block);
+        block = block->next;
+    }
+
+    return (uint32_t)(minutes * 60000.0f);
+}
+#endif
+
 
 // Re-initialize buffer plan with a partially completed block, assumed to exist at the buffer tail.
 // Called after a steppers have come to a complete stop for a feed hold and the cycle is stopped.

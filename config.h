@@ -207,7 +207,15 @@ or EMI triggering the related interrupt falsely or too many times.
 #endif
 
 #if !defined PATH_BLEND_TIMEOUT_MS || defined __DOXYGEN__
-#define PATH_BLEND_TIMEOUT_MS 10 // Maximum wait for a following G64 move (ms).
+#define PATH_BLEND_TIMEOUT_MS 10 // Maximum wait for a following G64 move when the planner is empty (ms).
+#endif
+
+#if !defined PATH_BLEND_LOW_WATER_MS || defined __DOXYGEN__
+#define PATH_BLEND_LOW_WATER_MS 30 // Release a held G64 move once queued planner motion drops to this (ms).
+#endif
+
+#if !defined PATH_BLEND_MAX_AGE_MS || defined __DOXYGEN__
+#define PATH_BLEND_MAX_AGE_MS 250 // Never hold a G64 move longer than this, regardless of queue depth (ms).
 #endif
 
 #if !defined GCODE_ERROR_DETAILS_ENABLE || defined __DOXYGEN__
@@ -773,6 +781,18 @@ disabled by default for other board builds.
     #define REPORT_REALTIME_AXIS_VELOCITY On
   #else
     #define REPORT_REALTIME_AXIS_VELOCITY Off
+  #endif
+#endif
+
+/*! \def REPORT_PATH_BLEND_QUEUE
+Report G64 look-ahead state in status reports as `|PQ:<queued ms>[,<held move age ms>]|`.
+The age is only present while a G64 move is being held for the next command.
+*/
+#if !defined REPORT_PATH_BLEND_QUEUE || defined __DOXYGEN__
+  #if ENABLE_PATH_BLENDING && defined(BOARD_WAVESHARE_OPENH743I)
+    #define REPORT_PATH_BLEND_QUEUE On
+  #else
+    #define REPORT_PATH_BLEND_QUEUE Off
   #endif
 #endif
 

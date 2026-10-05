@@ -1291,6 +1291,58 @@ FLASHMEM void st_parking_restore_buffer (void)
     pl_block = NULL; // Set to reload next block.
 }
 
+#if ENABLE_JERK_ACCELERATION
+
+#define JERK_PLAN_FACTOR 0.9f // Plan below the jerk limit to leave headroom for per segment correction.
+
+// Distance needed to go from speed v and deceleration a to speed ve and zero deceleration
+// via a deceleration plateau ap, all transitions at the given jerk.
+static float jerk_decel_distance (float v, float a, float ve, float ap, float jerk)
+{
+    float t1 = fabsf(ap - a) / jerk;
+    float v1 = v - fabsf(ap * ap - a * a) * 0.5f / jerk;
+    float t3 = ap / jerk;
+    float v2 = ve + 0.5f * ap * t3;
+
+    return t1 * (v - t1 * (0.5f * a + (ap > a ? jerk : -jerk) * t1 * (1.0f / 6.0f))) +
+            (v1 - v2) / ap * 0.5f * (v1 + v2) +
+             t3 * (ve + ap * t3 * (1.0f / 6.0f));
+}
+
+// Returns the end of segment deceleration that, within the jerk limit, keeps the profile on track
+// for reaching exit speed with zero deceleration exactly when the remaining distance is consumed.
+static float jerk_decel_target (float v, float a, float ve, float distance, float dt, float jerk, float max_accel)
+{
+    float target, dv = v - ve, jerk_plan = jerk * JERK_PLAN_FACTOR;
+
+    if(dv <= 0.0f || distance <= 0.0f)
+        target = 0.0f;
+    else if(dv - 0.5f * a * a / jerk_plan <= a * dt) {
+        // Final ramp down: linearly reduce deceleration to land on exit speed at end of distance.
+        // Never exceed the ramp landing exactly on exit speed, over-braking stops short and then crawls.
+        target = 2.0f * dv * (ve + dv * (1.0f / 3.0f)) / distance;
+        target = min(target - 0.5f * target * target / dv * dt, a - 0.5f * a * a / dv * dt);
+    } else {
+        float lo = 0.0f, hi = min(max_accel, sqrtf(jerk_plan * dv + 0.5f * a * a));
+        // Distance decreases monotonically with plateau deceleration, bisect for the one that fits.
+        if(jerk_decel_distance(v, a, ve, hi, jerk_plan) < distance) {
+            uint_fast8_t i = 20;
+            do {
+                target = 0.5f * (lo + hi);
+                if(jerk_decel_distance(v, a, ve, target, jerk_plan) > distance)
+                    lo = target;
+                else
+                    hi = target;
+            } while(--i);
+        }
+        target = hi;
+    }
+
+    return max(min(target, min(a + jerk * dt, max_accel)), max(a - jerk * dt, 0.0f));
+}
+
+#endif // ENABLE_JERK_ACCELERATION
+
 /* Prepares step segment buffer. Continuously called from main program.
 
    The segment buffer is an intermediary buffer interface between the execution of steps
@@ -1659,32 +1711,21 @@ void st_prep_buffer (void)
                     // NOTE: mm_var used as a misc worker variable to prevent errors when near zero speed.
 #if ENABLE_JERK_ACCELERATION
                     if(prep.jerk) {
-                        float accel_var = pl_block->jerk * time_var; // Delta acceleration
-                        float time_to_jerk = prep.last_accel == 0.0f ? accel_var : (prep.last_accel / pl_block->jerk);
-                        float jerk_rampdown = prep.exit_speed +
-                                               time_to_jerk * (prep.last_accel -
-                                                               (0.5f * pl_block->jerk * time_to_jerk)); // Speedpoint to start ramping down deceleration. (V = a * t - 1/2 j * t^2)
+                        float last_accel = prep.last_accel;
+                        prep.last_accel = jerk_decel_target(prep.current_speed, last_accel, prep.exit_speed,
+                                                             mm_remaining - prep.mm_complete, time_var,
+                                                              pl_block->jerk, pl_block->max_acceleration);
 #ifdef JERK_LOG
                         jlog.data[jlog.idx].s0 = prep.decelerate_after - mm_remaining;
                         jlog.data[jlog.idx].v0 = prep.current_speed;
-                        jlog.data[jlog.idx].a0 = prep.last_accel;
-                        jlog.data[jlog.idx].da = jlog.idx == 0 ? prep.last_accel : (prep.last_accel - jlog.data[jlog.idx-1].a0);
-                        jlog.data[jlog.idx].s = jerk_rampdown;
-                        jlog.data[jlog.idx].t = time_to_jerk;
+                        jlog.data[jlog.idx].a0 = last_accel;
+                        jlog.data[jlog.idx].da = prep.last_accel - last_accel;
+                        jlog.data[jlog.idx].s = mm_remaining - prep.mm_complete;
+                        jlog.data[jlog.idx].t = time_var;
+                        if(jlog.ru == 0 && prep.last_accel < last_accel) jlog.ru = jlog.idx;
+                        jlog.data[jlog.idx].ramp_down = prep.last_accel < last_accel;
 #endif
-                        if(prep.current_speed > jerk_rampdown) {
-                            // Check if we are on ramp up or ramp down. Ramp down if speed is less than speed needed for reaching 0 acceleration.
-                            // Then limit acceleration change by jerk up to max acceleration and update for next segment.
-                            // Minimum acceleration of jerk per time_var to ensure deceleration completes. Acceleration change at end of ramp is in acceptable jerk range.
-                            prep.last_accel = min(prep.last_accel + accel_var, pl_block->max_acceleration);
-                        } else {
-#ifdef JERK_LOG
-                            if(jlog.ru == 0) jlog.ru = jlog.idx;
-                            jlog.data[jlog.idx].ramp_down = true;
-#endif
-                            prep.last_accel = max(prep.last_accel - accel_var, accel_var);
-                        }
-                        speed_var = prep.last_accel * time_var; // Used as delta speed (mm/min)
+                        speed_var = 0.5f * (last_accel + prep.last_accel) * time_var; // Used as delta speed (mm/min)
                     } else
 #endif //ENABLE_JERK_ACCELERATION
                     speed_var = pl_block->acceleration * time_var; // Used as delta speed (mm/min)

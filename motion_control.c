@@ -84,8 +84,9 @@ typedef struct {
 
 static blend_candidate_t blend_pending;
 static bool blend_emitting = false;
+static path_blend_stats_t blend_stats = {0};
 
-static bool blend_flush_pending (void);
+static bool blend_flush_pending (uint32_t *reason);
 static bool blend_store_candidate (float *target, plan_line_data_t *pl_data, float *start);
 static bool blend_resolve_corner (float *target, plan_line_data_t *pl_data);
 
@@ -118,13 +119,14 @@ static bool blend_store_candidate (float *target, plan_line_data_t *pl_data, flo
     return true;
 }
 
-static bool blend_flush_pending (void)
+static bool blend_flush_pending (uint32_t *reason)
 {
     bool ok;
 
     if(!blend_pending.valid)
         return true;
 
+    (*reason)++;
     blend_pending.valid = false;
     blend_emitting = true;
     ok = mc_line(blend_pending.target, &blend_pending.data);
@@ -267,6 +269,7 @@ static bool blend_resolve_corner (float *target, plan_line_data_t *pl_data)
     bool ok = plan_buffer_batch(targets, data, 3);
     blend_emitting = false;
     if(ok) {
+        blend_stats.blended++;
         st_execution_complete(blend_pending.data.execution_id);
         blend_pending.valid = false;
 
@@ -281,20 +284,47 @@ static bool blend_resolve_corner (float *target, plan_line_data_t *pl_data)
         return true;
     }
 
-    blend_flush_pending();
+    blend_flush_pending(&blend_stats.no_corner);
     return false;
 }
 
 void mc_path_blend_flush (void)
 {
-    blend_flush_pending();
+    blend_flush_pending(&blend_stats.forced);
 }
 
-void mc_path_blend_flush_if_timeout (void)
+bool mc_path_blend_pending_age (uint32_t *age_ms)
 {
-    if(blend_pending.valid && (!hal.get_elapsed_ticks ||
-       (uint32_t)(hal.get_elapsed_ticks() - blend_pending.timestamp) >= PATH_BLEND_TIMEOUT_MS))
-        blend_flush_pending();
+    if(!blend_pending.valid)
+        return false;
+
+    *age_ms = hal.get_elapsed_ticks ? (uint32_t)(hal.get_elapsed_ticks() - blend_pending.timestamp) : 0;
+
+    return true;
+}
+
+const path_blend_stats_t *mc_path_blend_get_stats (void)
+{
+    return &blend_stats;
+}
+
+// Called when no input is pending: decides whether to keep waiting for the next G64 move.
+void mc_path_blend_poll (void)
+{
+    uint32_t age;
+
+    if(!mc_path_blend_pending_age(&age))
+        return;
+
+    if(!hal.get_elapsed_ticks)
+        blend_flush_pending(&blend_stats.idle);
+    else if(plan_get_current_block() == NULL) {
+        if(age >= PATH_BLEND_TIMEOUT_MS)
+            blend_flush_pending(&blend_stats.idle);
+    } else if(age >= PATH_BLEND_MAX_AGE_MS)
+        blend_flush_pending(&blend_stats.max_age);
+    else if(plan_get_queued_time_ms() <= PATH_BLEND_LOW_WATER_MS)
+        blend_flush_pending(&blend_stats.low_water);
 }
 
 void mc_path_blend_cancel (void)
@@ -341,14 +371,14 @@ bool mc_line (float *target, plan_line_data_t *pl_data)
         if(blend_pending.valid) {
             if(blend_resolve_corner(target, pl_data))
                 return true;
-            blend_flush_pending();
+            blend_flush_pending(&blend_stats.no_corner);
             memcpy(start, plan_get_position(), sizeof(start));
         }
 
         if(blend_store_candidate(target, pl_data, start))
             return true;
     } else if(!blend_emitting)
-        blend_flush_pending();
+        blend_flush_pending(&blend_stats.forced);
 #endif
 
     // If in check gcode mode, prevent motion by blocking planner. Soft limits still work.

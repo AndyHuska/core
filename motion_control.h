@@ -57,8 +57,23 @@ status_code_t mc_jog_execute(plan_line_data_t *pl_data, parser_block_t *gc_block
 // Dwell for a specific number of seconds
 void mc_dwell(float seconds, line_number_t execution_id);
 void mc_path_blend_flush (void);
-void mc_path_blend_flush_if_timeout (void);
 void mc_path_blend_cancel (void);
+
+#if ENABLE_PATH_BLENDING
+// Cumulative since boot: corners blended, and why each held G64 move was released.
+typedef struct {
+    uint32_t blended;
+    uint32_t idle;      // planner empty and PATH_BLEND_TIMEOUT_MS elapsed
+    uint32_t low_water; // queued time fell to PATH_BLEND_LOW_WATER_MS
+    uint32_t max_age;   // held for PATH_BLEND_MAX_AGE_MS
+    uint32_t forced;    // sync, non-blendable motion or other explicit flush
+    uint32_t no_corner; // next move arrived but the corner could not be blended
+} path_blend_stats_t;
+
+void mc_path_blend_poll (void);
+bool mc_path_blend_pending_age (uint32_t *age_ms);
+const path_blend_stats_t *mc_path_blend_get_stats (void);
+#endif
 
 // Perform homing cycle to locate machine zero. Requires limit switches.
 status_code_t mc_homing_cycle(axes_signals_t cycle);

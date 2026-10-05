@@ -202,6 +202,9 @@ bool plan_buffer_line (float *target, plan_line_data_t *pl_data);
 
 #if ENABLE_PATH_BLENDING
 bool plan_buffer_batch (float (*targets)[N_AXIS], plan_line_data_t *pl_data, uint_fast8_t count);
+
+// Estimated time to execute all queued planner blocks, in milliseconds.
+uint32_t plan_get_queued_time_ms (void);
 #endif
 
 // Called when the current block is no longer needed. Discards the block and makes the memory

@@ -40,6 +40,7 @@
 #include "ioports.h"
 #include "state_machine.h"
 #include "stepper.h"
+#include "motion_control.h"
 #include "canbus.h"
 #include "regex.h"
 
@@ -1197,6 +1198,24 @@ FLASHMEM void report_build_info (char *line, bool extended)
             hal.stream.write("]" ASCII_EOL);
         }
 
+#if ENABLE_PATH_BLENDING
+        const path_blend_stats_t *blend = mc_path_blend_get_stats();
+        // blended,idle,low_water,max_age,forced,no_corner
+        hal.stream.write("[G64:");
+        hal.stream.write(uitoa(blend->blended));
+        hal.stream.write(",");
+        hal.stream.write(uitoa(blend->idle));
+        hal.stream.write(",");
+        hal.stream.write(uitoa(blend->low_water));
+        hal.stream.write(",");
+        hal.stream.write(uitoa(blend->max_age));
+        hal.stream.write(",");
+        hal.stream.write(uitoa(blend->forced));
+        hal.stream.write(",");
+        hal.stream.write(uitoa(blend->no_corner));
+        hal.stream.write("]" ASCII_EOL);
+#endif
+
         grbl.on_report_options(false);
     }
 }
@@ -1393,6 +1412,15 @@ void report_realtime_status (stream_write_ptr stream_write, status_report_tracki
         stream_write(ftoa(axis_rates[idx], 1));
         if(idx < (system_n_axis() - 1))
             stream_write(",");
+    }
+#endif
+
+#if ENABLE_PATH_BLENDING && REPORT_PATH_BLEND_QUEUE
+    {
+        uint32_t blend_age;
+        stream_write(appendbuf(2, "|PQ:", uitoa(plan_get_queued_time_ms())));
+        if(mc_path_blend_pending_age(&blend_age))
+            stream_write(appendbuf(2, ",", uitoa(blend_age)));
     }
 #endif
 
