@@ -419,7 +419,49 @@ DCRAM static struct {
     float target_feed;      //
     float inv_feedrate;     // Used by PWM laser mode to speed up segment calculations.
     float current_spindle_rpm;
+    float accel;            // Constant acceleration of the profile (mm/min^2)
+#if ENABLE_PATH_BLENDING && PATH_BLEND_ARC_LAW
+    bool arc_law;           // Profile follows the acceleration-circle law of a G64 arc block.
+    float arc_accel;        // Arc-plane acceleration A (mm/min^2)
+    float arc_limit_sqr;    // A R (mm/min)^2
+    float arc_radius;       // R (mm)
+#endif
 } prep;
+
+// Profile distance from rest to speed_sqr under the profile's speed-change law; every ramp length is a difference
+// of it. Constant acceleration: v^2 / (2a). Circle-law arcs: (R/2) asin(v^2 / (A R)) (Firmware_Planner_Modifications.md FW-2).
+static float profile_distance (float speed_sqr)
+{
+#if ENABLE_PATH_BLENDING && PATH_BLEND_ARC_LAW
+    if(prep.arc_law)
+        return 0.5f * prep.arc_radius * asinf(min(1.0f, speed_sqr / prep.arc_limit_sqr));
+#endif
+    return 0.5f * speed_sqr / prep.accel;
+}
+
+// Inverse of profile_distance.
+static float profile_speed_sqr (float distance)
+{
+#if ENABLE_PATH_BLENDING && PATH_BLEND_ARC_LAW
+    if(prep.arc_law)
+        return prep.arc_limit_sqr * sinf(min(0.5f * (float)M_PI, 2.0f * max(0.0f, distance) / prep.arc_radius));
+#endif
+    return 2.0f * prep.accel * max(0.0f, distance);
+}
+
+#if ENABLE_PATH_BLENDING && PATH_BLEND_ARC_LAW
+// One segment step of dt along a circle-law ramp: estimates the distance with the tangential budget at the
+// current speed, then takes the new speed from the law at the new position, so it never leaves the circle.
+static float arc_law_step (float speed, float dt, bool accelerate, float *distance)
+{
+    float w = speed * speed / prep.arc_limit_sqr;
+    float dv = prep.arc_accel * sqrtf(max(0.0f, 1.0f - w * w)) * dt;
+
+    *distance = dt * max(0.0f, accelerate ? speed + 0.5f * dv : speed - 0.5f * dv);
+
+    return sqrtf(profile_speed_sqr(profile_distance(speed * speed) + (accelerate ? *distance : -*distance)));
+}
+#endif
 
 #if REPORT_REALTIME_AXIS_VELOCITY
 static void st_clear_realtime_axis_rates (void)
@@ -1474,17 +1516,25 @@ void st_prep_buffer (void)
              hold, override the planner velocities and decelerate to the target exit speed.
             */
             prep.mm_complete = 0.0f; // Default velocity profile complete at 0.0mm from end of block.
-            float inv_2_accel = 0.5f / pl_block->acceleration;
+            prep.accel = pl_block->acceleration;
+#if ENABLE_PATH_BLENDING && PATH_BLEND_ARC_LAW
+            // Feed hold brakes at the constant fallback rate; normal motion on arcs follows the circle law.
+            if((prep.arc_law = pl_block->arc_accel > 0.0f && !sys.step_control.execute_hold)) {
+                prep.arc_accel = pl_block->arc_accel;
+                prep.arc_radius = pl_block->arc.radius;
+                prep.arc_limit_sqr = pl_block->arc_accel * pl_block->arc.radius;
+            }
+#endif
 
             if (sys.step_control.execute_hold) { // [Forced Deceleration to Zero Velocity]
                 // Compute velocity profile parameters for a feed hold in-progress. This profile overrides
                 // the planner block profile, enforcing a deceleration to zero speed.
                 prep.ramp_type = Ramp_Decel;
                 // Compute decelerate distance relative to end of block.
-                float decel_dist = pl_block->millimeters - inv_2_accel * pl_block->entry_speed_sqr;
+                float decel_dist = pl_block->millimeters - profile_distance(pl_block->entry_speed_sqr);
                 if(decel_dist < -0.0001f) {
                     // Deceleration through entire planner block. End of feed hold is not in this block.
-                    prep.exit_speed = sqrtf(pl_block->entry_speed_sqr - 2.0f * pl_block->acceleration * pl_block->millimeters);
+                    prep.exit_speed = sqrtf(profile_speed_sqr(profile_distance(pl_block->entry_speed_sqr) - pl_block->millimeters));
                 } else {
                     prep.mm_complete = decel_dist < 0.0001f ? 0.0f : decel_dist; // End of feed hold.
                     prep.exit_speed = 0.0f;
@@ -1504,13 +1554,16 @@ void st_prep_buffer (void)
 
                 float nominal_speed = plan_compute_profile_nominal_speed(pl_block);
                 float nominal_speed_sqr = nominal_speed * nominal_speed;
-                float intersect_distance = 0.5f * (pl_block->millimeters + inv_2_accel * (pl_block->entry_speed_sqr - exit_speed_sqr));
+                float entry_distance = profile_distance(pl_block->entry_speed_sqr);
+                float exit_distance = profile_distance(exit_speed_sqr);
+                float nominal_distance = profile_distance(nominal_speed_sqr);
+                float intersect_distance = 0.5f * (pl_block->millimeters + entry_distance - exit_distance);
 
                 prep.target_feed = nominal_speed;
 
                 if (pl_block->entry_speed_sqr > nominal_speed_sqr) { // Only occurs during override reductions.
 
-                    prep.accelerate_until = pl_block->millimeters - inv_2_accel * (pl_block->entry_speed_sqr - nominal_speed_sqr);
+                    prep.accelerate_until = pl_block->millimeters - (entry_distance - nominal_distance);
 
                     if (prep.accelerate_until <= 0.0f) { // Deceleration-only.
                         prep.ramp_type = Ramp_Decel;
@@ -1518,7 +1571,7 @@ void st_prep_buffer (void)
                         // prep.maximum_speed = prep.current_speed;
 
                         // Compute override block exit speed since it doesn't match the planner exit speed.
-                        prep.exit_speed = sqrtf(pl_block->entry_speed_sqr - 2.0f * pl_block->acceleration * pl_block->millimeters);
+                        prep.exit_speed = sqrtf(profile_speed_sqr(entry_distance - pl_block->millimeters));
                         prep.recalculate.decel_override = On; // Flag to load next block as deceleration override.
 
                         // TODO: Determine correct handling of parameters in deceleration-only.
@@ -1527,14 +1580,14 @@ void st_prep_buffer (void)
 
                     } else {
                         // Decelerate to cruise or cruise-decelerate types. Guaranteed to intersect updated plan.
-                        prep.decelerate_after = inv_2_accel * (nominal_speed_sqr - exit_speed_sqr); // Should always be >= 0.0 due to planner reinit.
+                        prep.decelerate_after = nominal_distance - exit_distance; // Should always be >= 0.0 due to planner reinit.
                         prep.maximum_speed = nominal_speed;
                         prep.ramp_type = Ramp_DecelOverride;
                     }
                 } else if (intersect_distance > 0.0f) {
                     if (intersect_distance < pl_block->millimeters) { // Either trapezoid or triangle types
                         // NOTE: For acceleration-cruise and cruise-only types, following calculation will be 0.0.
-                        prep.decelerate_after = inv_2_accel * (nominal_speed_sqr - exit_speed_sqr);
+                        prep.decelerate_after = nominal_distance - exit_distance;
                         if (prep.decelerate_after < intersect_distance) { // Trapezoid type
                             prep.maximum_speed = nominal_speed;
                             if (pl_block->entry_speed_sqr == nominal_speed_sqr) {
@@ -1542,11 +1595,11 @@ void st_prep_buffer (void)
                                 prep.ramp_type = Ramp_Cruise;
                             } else {
                                 // Full-trapezoid or acceleration-cruise types
-                                prep.accelerate_until -= inv_2_accel * (nominal_speed_sqr - pl_block->entry_speed_sqr);
+                                prep.accelerate_until -= nominal_distance - entry_distance;
                             }
                         } else { // Triangle type
                             prep.accelerate_until = prep.decelerate_after = intersect_distance;
-                            prep.maximum_speed = sqrtf(2.0f * pl_block->acceleration * intersect_distance + exit_speed_sqr);
+                            prep.maximum_speed = sqrtf(profile_speed_sqr(intersect_distance + exit_distance));
                         }
                     } else { // Deceleration-only type
                         prep.ramp_type = Ramp_Decel;
@@ -1612,6 +1665,12 @@ void st_prep_buffer (void)
             switch (prep.ramp_type) {
 
                 case Ramp_DecelOverride:
+#if ENABLE_PATH_BLENDING && PATH_BLEND_ARC_LAW
+                    if(prep.arc_law) {
+                        float speed = arc_law_step(prep.current_speed, time_var, false, &mm_var);
+                        speed_var = prep.current_speed - speed;
+                    } else
+#endif
                     speed_var = pl_block->acceleration * time_var;
                     if ((prep.current_speed - prep.maximum_speed) <= speed_var) {
                         // Cruise or cruise-deceleration types only for deceleration override.
@@ -1620,6 +1679,11 @@ void st_prep_buffer (void)
                         prep.ramp_type = Ramp_Cruise;
                         prep.current_speed = prep.maximum_speed;
                     } else {// Mid-deceleration override ramp.
+#if ENABLE_PATH_BLENDING && PATH_BLEND_ARC_LAW
+                        if(prep.arc_law)
+                            mm_remaining -= mm_var;
+                        else
+#endif
                         mm_remaining -= time_var * (prep.current_speed - 0.5f * speed_var);
                         prep.current_speed -= speed_var;
                     }
@@ -1664,8 +1728,14 @@ void st_prep_buffer (void)
                     } else
 #endif // ENABLE_JERK_ACCELERATION
                     speed_var = pl_block->acceleration * time_var;
-
+#if ENABLE_PATH_BLENDING && PATH_BLEND_ARC_LAW
+                    if(prep.arc_law) {
+                        speed_var = arc_law_step(prep.current_speed, time_var, true, &mm_var) - prep.current_speed;
+                        mm_remaining -= mm_var;
+                    } else
+#endif
                     mm_remaining -= time_var * (prep.current_speed + 0.5f * speed_var);
+
                     if (mm_remaining < prep.accelerate_until) { // End of acceleration ramp.
                         // Acceleration-cruise, acceleration-deceleration ramp junction, or end of block.
                         mm_remaining = prep.accelerate_until; // NOTE: 0.0 at EOB
@@ -1709,6 +1779,12 @@ void st_prep_buffer (void)
 
                 default: // case Ramp_Decel:
                     // NOTE: mm_var used as a misc worker variable to prevent errors when near zero speed.
+#if ENABLE_PATH_BLENDING && PATH_BLEND_ARC_LAW
+                    if(prep.arc_law) {
+                        float w = prep.current_speed * prep.current_speed / prep.arc_limit_sqr;
+                        speed_var = prep.arc_accel * sqrtf(max(0.0f, 1.0f - w * w)) * time_var; // circle's tangential budget
+                    } else
+#endif
 #if ENABLE_JERK_ACCELERATION
                     if(prep.jerk) {
                         float last_accel = prep.last_accel;
@@ -1735,6 +1811,11 @@ void st_prep_buffer (void)
                         mm_var = mm_remaining - time_var * (prep.current_speed - 0.5f * speed_var); // (mm)
                         if (mm_var > prep.mm_complete) { // Typical case. In deceleration ramp.
                             mm_remaining = mm_var;
+#if ENABLE_PATH_BLENDING && PATH_BLEND_ARC_LAW
+                            if(prep.arc_law) // Speed from the law at the distance still to go, so the ramp lands on the exit speed.
+                                prep.current_speed = min(prep.current_speed, sqrtf(profile_speed_sqr(profile_distance(prep.exit_speed * prep.exit_speed) + mm_var - prep.mm_complete)));
+                            else
+#endif
                             prep.current_speed -= speed_var;
                             break; // Segment complete. Exit switch-case statement. Continue do-while loop.
                         }

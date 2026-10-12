@@ -218,6 +218,10 @@ or EMI triggering the related interrupt falsely or too many times.
 #define PATH_BLEND_MAX_AGE_MS 250 // Never hold a G64 move longer than this, regardless of queue depth (ms).
 #endif
 
+#if !defined PATH_BLEND_ARC_KMAX || defined __DOXYGEN__
+#define PATH_BLEND_ARC_KMAX 0.9f // G64 arcs (jerk off): cruise centripetal acceleration as a fraction of the arc-plane limit, 0 < k < 1.
+#endif
+
 #if !defined GCODE_ERROR_DETAILS_ENABLE || defined __DOXYGEN__
 #define GCODE_ERROR_DETAILS_ENABLE 0 // Append optional G-code error details to error responses.
 #endif

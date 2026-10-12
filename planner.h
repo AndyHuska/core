@@ -85,6 +85,9 @@ typedef struct {
     float sweep;
     float radius;
 } planner_arc_t;
+
+// G64 arcs follow the acceleration-circle law (Firmware_Planner_Modifications.md FW-2); jerk builds keep constant acceleration.
+#define PATH_BLEND_ARC_LAW !ENABLE_JERK_ACCELERATION
 #endif
 
 // This struct stores a linear movement of a g-code block motion with its critical "nominal" values
@@ -105,6 +108,7 @@ typedef struct plan_block {
 #if ENABLE_PATH_BLENDING
     bool exact_stop;                // G61.1 forces zero speed at this programmed boundary.
     planner_arc_t arc;
+    float arc_accel;                // Arc-plane acceleration (mm/min^2) of the circle law; 0 = constant acceleration.
 #endif
     float target_mm[N_AXIS];        // Block target end location in mm for real-time reporting of distance to go.
 

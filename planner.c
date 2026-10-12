@@ -118,6 +118,22 @@ static bool plan_batch_active = false;
   look-ahead blocks numbering up to a hundred or more.
 
 */
+
+// Largest entry/exit speed^2 at one end of the block from speed_sqr at the other (acceleration and braking are
+// symmetric). Circle-law arcs: asin(w) grows by 2L/R with w = v^2 / (A R), the closed form of
+// d(v^2)/ds = 2 A sqrt(1 - w^2) (Firmware_Planner_Modifications.md FW-2).
+static inline float plan_reach_speed_sqr (plan_block_t *block, float speed_sqr)
+{
+#if ENABLE_PATH_BLENDING && PATH_BLEND_ARC_LAW
+    if(block->arc_accel > 0.0f) {
+        float limit_sqr = block->arc_accel * block->arc.radius;
+        float phi = asinf(min(1.0f, speed_sqr / limit_sqr)) + 2.0f * block->millimeters / block->arc.radius;
+        return phi >= 0.5f * (float)M_PI ? limit_sqr : limit_sqr * sinf(phi);
+    }
+#endif
+    return speed_sqr + 2.0f * block->acceleration * block->millimeters;
+}
+
 static void planner_recalculate (void)
 {
     // Initialize block pointer to the last block in the planner buffer.
@@ -135,7 +151,7 @@ static void planner_recalculate (void)
     plan_block_t *current = block;
 
     // Calculate maximum entry speed for last block in buffer, where the exit speed is always zero.
-    current->entry_speed_sqr = min(current->max_entry_speed_sqr, 2.0f * current->acceleration * current->millimeters);
+    current->entry_speed_sqr = min(current->max_entry_speed_sqr, plan_reach_speed_sqr(current, 0.0f));
 
     block = block->prev;
     if (block == block_buffer.planned) { // Only two plannable blocks in buffer. Reverse pass complete.
@@ -154,7 +170,7 @@ static void planner_recalculate (void)
 
         // Compute maximum entry speed decelerating over the current block from its exit speed.
         if (current->entry_speed_sqr != current->max_entry_speed_sqr) {
-            entry_speed_sqr = next->entry_speed_sqr + 2.0f * current->acceleration * current->millimeters;
+            entry_speed_sqr = plan_reach_speed_sqr(current, next->entry_speed_sqr);
             current->entry_speed_sqr = entry_speed_sqr < current->max_entry_speed_sqr ? entry_speed_sqr : current->max_entry_speed_sqr;
         }
     }
@@ -173,7 +189,7 @@ static void planner_recalculate (void)
         // pointer forward, since everything before this is all optimal. In other words, nothing
         // can improve the plan from the buffer tail to the planned pointer by logic.
         if (current->entry_speed_sqr < next->entry_speed_sqr) {
-            entry_speed_sqr = current->entry_speed_sqr + 2.0f * current->acceleration * current->millimeters;
+            entry_speed_sqr = plan_reach_speed_sqr(current, current->entry_speed_sqr);
         // If true, current block is full-acceleration and we can move the planned pointer forward.
             if (entry_speed_sqr < next->entry_speed_sqr) {
                 next->entry_speed_sqr = entry_speed_sqr; // Always <= max_entry_speed_sqr. Backward pass sets this.
@@ -615,15 +631,30 @@ bool plan_buffer_line (float *target, plan_line_data_t *pl_data)
     block->rapid_rate = limit_max_rate_by_axis_maximum(unit_vec);
 #if ENABLE_PATH_BLENDING
     if(block->arc.enabled) {
-        float min_rate = min(settings.axis[X_AXIS].max_rate, min(settings.axis[Y_AXIS].max_rate, settings.axis[Z_AXIS].max_rate));
-        float min_accel = min(settings.axis[X_AXIS].acceleration, min(settings.axis[Y_AXIS].acceleration, settings.axis[Z_AXIS].acceleration));
-        float centripetal_rate = sqrtf(min_accel * block->arc.radius * 0.5f);
-
-        block->rapid_rate = min(block->rapid_rate, min(min_rate, centripetal_rate));
-        block->acceleration = min(block->acceleration, min_accel * 0.5f);
-#if ENABLE_JERK_ACCELERATION
-        block->max_acceleration = min(block->max_acceleration, min_accel * 0.5f);
-#endif
+        // FW-1: each XYZ axis limits the arc by its share of the arc plane, sqrt(1 - n_i^2) (0 when normal to it),
+        // so e.g. Z does not limit an XY arc. Bounds every axis along the whole arc, not just at its start.
+        float plane_rate = SOME_LARGE_VALUE, plane_accel = SOME_LARGE_VALUE;
+        for(idx = 0; idx < 3; idx++) {
+            float share = sqrtf(max(0.0f, 1.0f - block->arc.normal[idx] * block->arc.normal[idx]));
+            if(share > 0.000001f) {
+                plane_rate = min(plane_rate, settings.axis[idx].max_rate / share);
+                plane_accel = min(plane_accel, settings.axis[idx].acceleration / share);
+            }
+        }
+  #if PATH_BLEND_ARC_LAW
+        // FW-2: tangential and centripetal acceleration share the circle a_t^2 + (v^2/R)^2 <= A^2. Cruise at
+        // v^2 <= k_max A R; speed changes follow the circle law (plan_reach_speed_sqr, stepper profile).
+        block->rapid_rate = min(plane_rate, sqrtf(PATH_BLEND_ARC_KMAX * plane_accel * block->arc.radius));
+        block->arc_accel = plane_accel;
+        // Constant-rate fallback (feed hold): the law's smallest tangential budget up to the cruise cap.
+        block->acceleration = plane_accel * sqrtf(1.0f - PATH_BLEND_ARC_KMAX * PATH_BLEND_ARC_KMAX);
+  #else
+        block->rapid_rate = min(plane_rate, sqrtf(0.5f * plane_accel * block->arc.radius));
+        block->acceleration = 0.5f * plane_accel;
+    #if ENABLE_JERK_ACCELERATION
+        block->max_acceleration = 0.5f * plane_accel;
+    #endif
+  #endif
         block->step_event_count = max(1.0f, ceilf(block->millimeters * max(settings.axis[X_AXIS].steps_per_mm,
                                             max(settings.axis[Y_AXIS].steps_per_mm, settings.axis[Z_AXIS].steps_per_mm))));
     }
@@ -725,6 +756,10 @@ bool plan_buffer_line (float *target, plan_line_data_t *pl_data)
         }
 
 #if ENABLE_PATH_BLENDING
+        // FW-4: joins into and out of a G64 blend arc are tangent by construction; only step rounding of the
+        // line's direction (mrad on short lines) separates them, which must not trigger junction deviation.
+        if(block->arc.enabled || block->prev->arc.enabled)
+            block->max_junction_speed_sqr = SOME_LARGE_VALUE;
         if(block->exact_stop || block->prev->exact_stop)
             block->max_junction_speed_sqr = 0.0f;
 #endif
