@@ -51,6 +51,9 @@ know when there is a realtime command to execute.
 #define EXEC_SAFETY_DOOR        bit(6)
 #define EXEC_MOTION_CANCEL      bit(7)
 #define EXEC_MOTION_CANCEL_FAST bit(7) // Permanently enabled for now
+#if AUTOREPORT_TELNET_ONLY
+#define EXEC_AUTO_STATUS_REPORT bit(8)
+#endif
 #define EXEC_SLEEP              bit(9)
 #define EXEC_TOOL_CHANGE        bit(10)
 #define EXEC_PID_REPORT         bit(11)

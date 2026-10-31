@@ -159,6 +159,7 @@ typedef struct {
 #if ENABLE_PATH_BLENDING
     float path_tolerance;           //!< Path blending tolerance.
     float cam_tolerance;            //!< Naive CAM tolerance.
+    float path_blend_k;             //!< G64 K: blend-arc sizing share (0 = largest arc within P).
 #endif
 #if PLANNER_ADD_MOTION_MODE
     motion_mode_t motion_mode;

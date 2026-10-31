@@ -477,7 +477,18 @@ static void st_clear_realtime_axis_rates (void)
 // handles mixed linear/rotary moves.
 static void st_update_realtime_axis_rates (const segment_t *segment, const st_block_t *block)
 {
-    if(segment == NULL || block == NULL || block->step_event_count == 0 || segment->cycles_per_tick == 0) {
+    if(segment == NULL || block == NULL || segment->cycles_per_tick == 0) {
+        st_clear_realtime_axis_rates();
+        return;
+    }
+
+    uint32_t step_event_count = block->step_event_count;
+#if ENABLE_PATH_BLENDING
+    if(segment->arc_motion)
+        step_event_count = segment->arc_step_event_count;
+#endif
+
+    if(step_event_count == 0) {
         st_clear_realtime_axis_rates();
         return;
     }
@@ -493,15 +504,24 @@ static void st_update_realtime_axis_rates (const segment_t *segment, const st_bl
         idx--;
 
         float steps_per_unit = settings.axis[idx].steps_per_mm;
-        if(steps_per_unit <= 0.0f || block->steps.value[idx] == 0) {
+        uint32_t axis_steps = block->steps.value[idx];
+        bool negative = (block->direction.mask & bit(idx)) != 0;
+#if ENABLE_PATH_BLENDING
+        if(segment->arc_motion) {
+            axis_steps = segment->arc_steps.value[idx];
+            negative = (segment->arc_direction.mask & bit(idx)) != 0;
+        }
+#endif
+
+        if(steps_per_unit <= 0.0f || axis_steps == 0) {
             realtime_axis_rate[idx] = 0.0f;
             continue;
         }
 
-        float axis_step_rate = step_events_per_min * ((float)block->steps.value[idx] / (float)block->step_event_count);
+        float axis_step_rate = step_events_per_min * ((float)axis_steps / (float)step_event_count);
         float axis_units_per_min = axis_step_rate / steps_per_unit;
 
-        if(block->direction.mask & bit(idx))
+        if(negative)
             axis_units_per_min = -axis_units_per_min;
 
         realtime_axis_rate[idx] = axis_units_per_min;

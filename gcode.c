@@ -2924,10 +2924,20 @@ status_code_t gc_execute_block (char *block)
             } else
                 gc_state.path_tolerance = settings_get_path_tolerance();
 
+            // K belongs to G64 unless a G2/G3 in the same block uses it as the arc centre offset.
+            if(gc_block.words.k && !(axis_command == AxisCommand_MotionMode &&
+                                      (gc_block.modal.motion == MotionMode_CwArc || gc_block.modal.motion == MotionMode_CcwArc))) {
+                if(gc_block.values.ijk[K_VALUE] < 0.0f || gc_block.values.ijk[K_VALUE] > 1.0f)
+                    RETURN_DETAIL(Status_GcodeValueOutOfRange, "G64 K must be 0..1");
+                gc_state.path_blend_k = gc_block.values.ijk[K_VALUE];
+                gc_block.words.k = Off;
+            } else
+                gc_state.path_blend_k = settings_get_path_blend_k();
+
             gc_state.cam_tolerance = 0.0f;
             gc_block.words.p = Off;
         } else
-            gc_state.path_tolerance = gc_state.cam_tolerance = 0.0f;
+            gc_state.path_tolerance = gc_state.cam_tolerance = gc_state.path_blend_k = 0.0f;
     }
 #endif
 
@@ -4531,6 +4541,7 @@ status_code_t gc_execute_block (char *block)
 #if ENABLE_PATH_BLENDING
         plan_data.cam_tolerance = gc_state.cam_tolerance;
         plan_data.path_tolerance = gc_state.path_tolerance;
+        plan_data.path_blend_k = gc_state.path_blend_k;
         plan_data.path_blend_candidate = gc_state.modal.motion == MotionMode_Linear;
 #endif
 #if PLANNER_ADD_MOTION_MODE

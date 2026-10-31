@@ -230,6 +230,10 @@ or EMI triggering the related interrupt falsely or too many times.
 #define DEFAULT_PATH_TOLERANCE 0.01f // Default G64 maximum path deviation in mm.
 #endif
 
+#if !defined DEFAULT_PATH_BLEND_K || defined __DOXYGEN__
+#define DEFAULT_PATH_BLEND_K 0.0f // Default G64 K: centripetal share of the arc-plane acceleration used to size blend arcs at feed (0 = largest arc within P).
+#endif
+
 #if !defined ENABLE_ACCELERATION_PROFILES || defined __DOXYGEN__
 #define ENABLE_ACCELERATION_PROFILES Off // Enable to allow G-Code changeable acceleration profiles.
 #endif
@@ -2180,6 +2184,10 @@ Auto status report interval, allowed range is 20 - 1000. Set to 0 to disable.
 #define DEFAULT_AUTOREPORT_INTERVAL 0
 #endif
 ///@}
+
+#ifndef AUTOREPORT_TELNET_ONLY
+#define AUTOREPORT_TELNET_ONLY 0
+#endif
 
 /*! @name $482 - Setting_TimeZoneOffset
 Timezone offset from UTC in hours, allowed range is -12.0 - 12.0.

@@ -193,6 +193,30 @@ static bool blend_resolve_corner (float *target, plan_line_data_t *pl_data)
     for(uint_fast8_t axis = 0; axis < 3; axis++)
         bisector[axis] /= bisector_length;
     radius = pl_data->path_tolerance / (1.0f / sin_half - 1.0f);
+
+    // G64 K: P is a maximum. Use the smallest arc the programmed feed can cross with centripetal acceleration
+    // K * A_plane (A_plane as in the planner's FW-1 arc limits); K is capped at the arc cruise share.
+    if(pl_data->path_blend_k > 0.0f && !pl_data->condition.inverse_time && !blend_pending.data.condition.inverse_time) {
+#if PATH_BLEND_ARC_LAW
+        float k = min(pl_data->path_blend_k, PATH_BLEND_ARC_KMAX);
+#else
+        float k = min(pl_data->path_blend_k, 0.5f);
+#endif
+        float feed = min(pl_data->feed_rate, blend_pending.data.feed_rate);
+        float plane_accel = SOME_LARGE_VALUE;
+        float n[3] = { in[1] * out[2] - in[2] * out[1], in[2] * out[0] - in[0] * out[2], in[0] * out[1] - in[1] * out[0] };
+        float n_length = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+
+        if(n_length > 0.000001f) {
+            for(uint_fast8_t axis = 0; axis < 3; axis++) {
+                float share = sqrtf(max(0.0f, 1.0f - (n[axis] * n[axis]) / (n_length * n_length)));
+                if(share > 0.000001f)
+                    plane_accel = min(plane_accel, settings.axis[axis].acceleration / share);
+            }
+            radius = min(radius, feed * feed / (k * plane_accel));
+        }
+    }
+
     trim = radius / tanf(theta * 0.5f);
     max_trim = min(len_in, len_out) * 0.5f;
     if(trim > max_trim) {

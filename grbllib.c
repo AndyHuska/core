@@ -161,7 +161,11 @@ static void realtime_report_check (void *data)
 static void auto_realtime_report (void *data)
 {
     if(sys.flags.auto_reporting) {
+#if AUTOREPORT_TELNET_ONLY
+        system_set_exec_state_flag(EXEC_AUTO_STATUS_REPORT);
+#else
         system_set_exec_state_flag(EXEC_STATUS_REPORT);
+#endif
         task_add_delayed(auto_realtime_report, NULL, settings.report_interval);
     } else if(settings.report_interval)
         task_add_delayed(realtime_report_check, NULL, settings.report_interval);

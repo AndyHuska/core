@@ -514,10 +514,21 @@ bool protocol_exec_rt_system (void)
                 // incoming stream. The same could be said about soft limits. While the position is not
                 // lost, continued streaming could cause a serious crash if by chance it gets executed.
 
+#if AUTOREPORT_TELNET_ONLY
+                rt_exec_t status_requests = sys.rt_exec_state & (EXEC_STATUS_REPORT|EXEC_AUTO_STATUS_REPORT);
+                if(status_requests) {
+                    system_clear_exec_state_flag(status_requests);
+                    if(status_requests & EXEC_STATUS_REPORT)
+                        report_realtime_status(hal.stream.write_all, &hal.stream.report);
+                    else
+                        stream_report_telnet_status();
+                }
+#else
                 if(bit_istrue(sys.rt_exec_state, EXEC_STATUS_REPORT)) {
                     system_clear_exec_state_flag(EXEC_STATUS_REPORT);
                     report_realtime_status(hal.stream.write_all, &hal.stream.report);
                 }
+#endif
 
                 protocol_poll_cmd();
                 grbl.on_execute_realtime(STATE_ESTOP);
@@ -617,6 +628,12 @@ bool protocol_exec_rt_system (void)
         // Execute and print status to output stream
         if (rt_exec & EXEC_STATUS_REPORT)
             report_realtime_status(hal.stream.write_all, &hal.stream.report);
+#if AUTOREPORT_TELNET_ONLY
+        else if(rt_exec & EXEC_AUTO_STATUS_REPORT)
+            stream_report_telnet_status();
+
+        rt_exec &= ~EXEC_AUTO_STATUS_REPORT;
+#endif
 
         if(rt_exec & EXEC_GCODE_REPORT)
             report_gcode_modes(hal.stream.write);
@@ -884,7 +901,7 @@ ISR_CODE bool ISR_FUNC(protocol_enqueue_realtime_command)(uint8_t c)
 
         case CMD_STATUS_REPORT:
         case 0x05:
-            if(!sys.flags.auto_reporting)
+            if(AUTOREPORT_TELNET_ONLY || !sys.flags.auto_reporting)
                 system_set_exec_state_flag(EXEC_STATUS_REPORT);
             drop = true;
             break;

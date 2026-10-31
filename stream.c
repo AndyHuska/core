@@ -273,6 +273,21 @@ static void stream_write_all (const char *s)
     }
 }
 
+#if AUTOREPORT_TELNET_ONLY
+void stream_report_telnet_status (void)
+{
+    stream_connection_t *connection = connections;
+
+    while(connection) {
+        if(connection->stream->type == StreamType_Telnet && connection->is_up()) {
+            report_realtime_status(connection->stream->write, &hal.stream.report);
+            break;
+        }
+        connection = connection->next;
+    }
+}
+#endif
+
 FLASHMEM static stream_connection_t *add_connection (const io_stream_t *stream)
 {
     stream_connection_t *connection, *last = connections;

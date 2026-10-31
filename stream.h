@@ -504,6 +504,10 @@ void stream_disconnect (const io_stream_t *stream);
 
 bool stream_connected (void);
 
+#if AUTOREPORT_TELNET_ONLY
+void stream_report_telnet_status (void);
+#endif
+
 bool stream_await_tx_clear (const io_stream_t *stream);
 
 void stream_set_defaults (const io_stream_t *stream, uint32_t baud_rate);
