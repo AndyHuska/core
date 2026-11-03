@@ -78,6 +78,26 @@ typedef struct {
 // Most of the event handlers defaults to NULL, a few is set up to call a dummy handler for simpler code.
 
 typedef bool (*enqueue_gcode_ptr)(char *data);
+typedef enum {
+    MotionDispatch_Validate,
+    MotionDispatch_Execute
+} motion_dispatch_stage_t;
+
+typedef struct {
+    const parser_block_t *block;
+    const float *target;
+    const float *position;
+    axes_signals_t axes;
+    motion_dispatch_stage_t stage;
+    bool is_motion;
+    bool jog;
+    bool check_mode;
+    bool has_auxiliary_commands;
+    bool raw;
+} motion_dispatch_request_t;
+
+typedef status_code_t (*on_motion_dispatch_ptr)(const motion_dispatch_request_t *request,
+                                               plan_line_data_t *data, bool *handled);
 typedef bool (*protocol_enqueue_realtime_command_ptr)(char c);
 typedef bool (*travel_limits_ptr)(float *target, axes_signals_t axes, bool is_cartesian, work_envelope_t *envelope);
 typedef bool (*arc_limits_ptr)(coord_data_t *target, coord_data_t *position, point_2d_t center, float radius, plane_t plane, int32_t turns, work_envelope_t *envelope);
@@ -272,6 +292,7 @@ typedef struct {
     on_tool_changed_ptr on_tool_changed;                        //!< Called after executing M6 or M61.
     on_toolchange_ack_ptr on_toolchange_ack;                    //!< Called from interrupt context.
     on_jog_cancel_ptr on_jog_cancel;                            //!< Called from interrupt context.
+    on_motion_dispatch_ptr on_motion_dispatch;
     on_laser_ppi_enable_ptr on_laser_ppi_enable;
     on_spindle_select_ptr on_spindle_select;                    //!< Called before spindle is selected, hook in HAL overrides here
     on_spindle_selected_ptr on_spindle_selected;                //!< Called when spindle is selected, do not change HAL pointers here!
