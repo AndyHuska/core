@@ -385,6 +385,26 @@ bool mc_line (float *target, plan_line_data_t *pl_data)
     if(!(pl_data->condition.target_validated && pl_data->condition.target_valid))
         limits_soft_check(target, pl_data->condition);
 
+    if(grbl.on_motion_dispatch) {
+        motion_dispatch_request_t request = {
+            .target = target, .position = plan_get_position(),
+            .stage = MotionDispatch_Validate, .is_motion = true,
+            .jog = pl_data->condition.jog_motion,
+            .check_mode = state_get() == STATE_CHECK_MODE, .raw = true
+        };
+        for(uint_fast8_t axis = 0; axis < N_AXIS; axis++)
+            if(target[axis] != request.position[axis])
+                request.axes.mask |= bit(axis);
+        bool handled = false;
+        if(grbl.on_motion_dispatch(&request, NULL, &handled) != Status_OK)
+            return false;
+        if(handled) {
+            request.stage = MotionDispatch_Execute;
+            handled = false;
+            return grbl.on_motion_dispatch(&request, pl_data, &handled) == Status_OK && handled;
+        }
+    }
+
 #if ENABLE_PATH_BLENDING
      if(!blend_emitting && state_get() != STATE_CHECK_MODE && !pl_data->condition.system_motion &&
          !pl_data->condition.jog_motion && !pl_data->condition.rapid_motion && pl_data->path_blend_candidate &&

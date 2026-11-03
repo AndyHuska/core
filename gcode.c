@@ -3813,6 +3813,11 @@ status_code_t gc_execute_block (char *block)
 
     // [0. Non-specific error-checks]: Complete unused value words check, i.e. IJK used when in arc
     // radius mode, or axis words that aren't used in the block.
+    bool dispatch_auxiliary = (command_words.mask & UINT32_C(0xFFFF0000)) ||
+        gc_block.words.s || gc_block.words.t || gc_block.macro_call != MacroCall_End;
+#if NGC_PARAMETERS_ENABLE
+    dispatch_auxiliary = dispatch_auxiliary || gc_state.g66_args != NULL;
+#endif
     if (gc_parser_flags.jog_motion) // Jogging only uses the F feed rate and XYZ value words. N is valid, but S and T are invalid.
         gc_block.words.n = gc_block.words.f = Off;
     else
@@ -3823,6 +3828,27 @@ status_code_t gc_execute_block (char *block)
 
     if (gc_block.words.mask)
         RETURN(Status_GcodeUnusedWords); // [Unused words]
+
+    bool motion_dispatched = false;
+    motion_dispatch_request_t dispatch = {
+        .block = &gc_block,
+        .target = gc_block.values.xyz,
+        .position = gc_state.position,
+        .axes = { .mask = axis_words.mask },
+        .stage = MotionDispatch_Validate,
+        .is_motion = axis_command == AxisCommand_MotionMode,
+        .jog = gc_parser_flags.jog_motion,
+        .check_mode = state_get() == STATE_CHECK_MODE,
+        .has_auxiliary_commands = dispatch_auxiliary
+    };
+
+    if(grbl.on_motion_dispatch) {
+        status_code_t result = grbl.on_motion_dispatch(&dispatch, NULL, &motion_dispatched);
+        if(result != Status_OK)
+            RETURN_DETAIL(result, "External motion validation failed");
+        if(motion_dispatched && !dispatch.is_motion && !dispatch.jog)
+            RETURN_DETAIL(Status_GcodeUnsupportedCommand, "External non-motion dispatch is not supported");
+    }
 
     /* -------------------------------------------------------------------------------------
      STEP 4: EXECUTE!!
@@ -3864,7 +3890,18 @@ status_code_t gc_execute_block (char *block)
         plan_data.condition.coolant = gc_state.modal.coolant;
         plan_data.condition.is_rpm_rate_adjusted = gc_state.is_rpm_rate_adjusted || (spindle->state.ccw && spindle->hal->cap.laser);
 
-        if((status_code_t)(int_value = (uint_fast16_t)mc_jog_execute(&plan_data, &gc_block, gc_state.position)) == Status_OK)
+        if(motion_dispatched) {
+            bool handled = false;
+            dispatch.stage = MotionDispatch_Execute;
+            plan_data.feed_rate = gc_block.values.f;
+            plan_data.condition.jog_motion = On;
+            int_value = grbl.on_motion_dispatch(&dispatch, &plan_data, &handled);
+            if(!handled && int_value == Status_OK)
+                int_value = Status_GcodeUnsupportedCommand;
+        } else
+            int_value = mc_jog_execute(&plan_data, &gc_block, gc_state.position);
+
+        if((status_code_t)int_value == Status_OK)
             memcpy(gc_state.position, gc_block.values.xyz, sizeof(gc_state.position));
 
         RETURN_DETAIL((status_code_t)int_value, "Jog command execution failed");
@@ -4549,7 +4586,14 @@ status_code_t gc_execute_block (char *block)
 #endif
         pos_update_t gc_update_pos = GCUpdatePos_Target;
 
-        switch(gc_state.modal.motion) {
+        if(motion_dispatched) {
+            bool handled = false;
+            dispatch.stage = MotionDispatch_Execute;
+            plan_data.condition.rapid_motion = gc_state.modal.motion == MotionMode_Seek;
+            status_code_t result = grbl.on_motion_dispatch(&dispatch, &plan_data, &handled);
+            if(result != Status_OK || !handled)
+                RETURN_DETAIL(result == Status_OK ? Status_GcodeUnsupportedCommand : result, "External motion dispatch failed");
+        } else switch(gc_state.modal.motion) {
 
             case MotionMode_Linear:
                 if(gc_state.modal.feed_mode == FeedMode_UnitsPerRev) {
