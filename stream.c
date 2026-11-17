@@ -37,6 +37,58 @@
 
 DCRAM static stream_rx_buffer_t rxbackup;
 
+#if defined(CLIENT_SUPERVISION_ENABLE) && CLIENT_SUPERVISION_ENABLE
+static volatile uint32_t client_last_rx_ms;
+static bool client_watchdog_armed;
+static bool client_watchdog_latched;
+
+void stream_client_supervision_rx (void)
+{
+    client_last_rx_ms = hal.get_elapsed_ticks();
+}
+
+void stream_client_supervision_reset (void)
+{
+    client_watchdog_armed = false;
+    client_watchdog_latched = false;
+    client_last_rx_ms = 0;
+}
+
+bool stream_client_supervision_poll (uint_fast16_t state)
+{
+    const sys_state_t active_motion = STATE_CYCLE | STATE_JOG | STATE_HOMING | STATE_HOLD | STATE_SAFETY_DOOR;
+    uint32_t now = hal.get_elapsed_ticks();
+
+    if(client_watchdog_latched) {
+        if(state == STATE_IDLE)
+            stream_client_supervision_reset();
+        return false;
+    }
+
+    if(!(state & active_motion)) {
+        client_watchdog_armed = false;
+        return false;
+    }
+
+    if(!client_watchdog_armed) {
+        client_last_rx_ms = now;
+        client_watchdog_armed = true;
+        return false;
+    }
+
+#if CLIENT_SUPERVISION_TIMEOUT_MS > 0
+    if((uint32_t)(now - client_last_rx_ms) >= CLIENT_SUPERVISION_TIMEOUT_MS) {
+        client_watchdog_latched = true;
+        system_set_exec_alarm(Alarm_ClientTimeout);
+        system_set_exec_state_flag(EXEC_RESET);
+        return true;
+    }
+#endif
+
+    return false;
+}
+#endif
+
 typedef struct {
     enqueue_realtime_command_ptr enqueue_realtime_command;
     stream_read_ptr read;

@@ -139,6 +139,13 @@ static char gc_error_detail_buffer[48];
 m98_macro_t *m98_macros = NULL;
 static tool_data_t *pending_tool = NULL;
 static output_command_t *output_commands = NULL; // Linked list
+static const char *motion_dispatch_detail = NULL;
+
+// Lets a motion dispatch handler supply the error detail for a rejected block.
+void gc_set_motion_dispatch_detail (const char *detail)
+{
+    motion_dispatch_detail = detail;
+}
 static line_number_t current_execution_id = 0;
 static scale_factor_t scale_factor = {
     .ijk[X_AXIS] = 1.0f,
@@ -1046,11 +1053,19 @@ FLASHMEM static bool add_output_command (output_command_t *command)
     return add_cmd != NULL;
 }
 
+// Queue an output command to be executed with the next motion block.
+bool gc_queue_output_command (output_command_t *command)
+{
+    return add_output_command(command);
+}
+
 // Free linked list of output commands
 FLASHMEM void gc_clear_output_commands (output_command_t *cmd)
 {
     while(cmd) {
         output_command_t *next = cmd->next;
+        if(cmd->exec)
+            cmd->exec(cmd, true);
         free(cmd);
         cmd = next;
     }
@@ -3843,9 +3858,10 @@ status_code_t gc_execute_block (char *block)
     };
 
     if(grbl.on_motion_dispatch) {
+        motion_dispatch_detail = NULL;
         status_code_t result = grbl.on_motion_dispatch(&dispatch, NULL, &motion_dispatched);
         if(result != Status_OK)
-            RETURN_DETAIL(result, "External motion validation failed");
+            RETURN_DETAIL(result, motion_dispatch_detail ? motion_dispatch_detail : "External motion validation failed");
         if(motion_dispatched && !dispatch.is_motion && !dispatch.jog)
             RETURN_DETAIL(Status_GcodeUnsupportedCommand, "External non-motion dispatch is not supported");
     }

@@ -218,6 +218,11 @@
     direct_motion_init();
 #endif
 
+#if VELOCITY_AXES_ENABLE
+    extern void velocity_axes_init (void);
+    velocity_axes_init();
+#endif
+
 #if BLTOUCH_ENABLE
     extern void bltouch_init (void);
     bltouch_init();

@@ -47,7 +47,8 @@ typedef struct {
 typedef enum {
     IpMode_Static = 0,
     IpMode_DHCP,
-    IpMode_AutoIP
+    IpMode_AutoIP,
+    IpMode_BOOTP = 3
 } ip_mode_t;
 
 typedef union {

@@ -880,6 +880,11 @@ ISR_CODE bool ISR_FUNC(protocol_enqueue_realtime_command)(uint8_t c)
             break;
 
         case CMD_RESET: // Call motion control reset routine.
+#if defined(CLIENT_SUPERVISION_ENABLE) && CLIENT_SUPERVISION_ENABLE
+            stream_client_supervision_reset();
+#endif
+            if(grbl.on_soft_reset)
+                grbl.on_soft_reset();
             if(!hal.control.get_state().e_stop)
                 mc_reset();
             drop = true;

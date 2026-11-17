@@ -561,6 +561,11 @@ static void task_execute (sys_state_t state)
 
     st_execution_process();
 
+#if defined(CLIENT_SUPERVISION_ENABLE) && CLIENT_SUPERVISION_ENABLE
+    if(stream_client_supervision_poll(state))
+        return;
+#endif
+
     if(tasks.immediate && sys.driver_started) {
 
         hal.irq_disable();

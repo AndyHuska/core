@@ -32,6 +32,9 @@
 #if VELOCITY_JOG_ENABLE
 #include "../plugins/direct_motion.h"
 #endif
+#if VELOCITY_AXES_ENABLE
+#include "../plugins/velocity_axes.h"
+#endif
 
 //#define MINIMIZE_PROBE_OVERSHOOT
 
@@ -917,7 +920,9 @@ ISR_CODE void ISR_FUNC(stepper_driver_interrupt_handler)(void)
                     bool applied;
                     if(cmd->execution_id)
                         active_execution_id = cmd->execution_id;
-                    if(cmd->is_digital)
+                    if(cmd->exec)
+                        applied = cmd->exec(cmd, false);
+                    else if(cmd->is_digital)
                         applied = ioport_digital_out(cmd->port, cmd->value != 0.0f);
                     else
                         applied = ioport_analog_out(cmd->port, cmd->value);
@@ -2102,18 +2107,22 @@ void st_get_realtime_axis_rates (float *rates)
         return;
 
 #if VELOCITY_JOG_ENABLE
-    if(direct_motion_get_realtime_axis_rates(rates))
-        return;
+    if(!direct_motion_get_realtime_axis_rates(rates))
 #endif
-
-    if(state_get() & (STATE_CYCLE|STATE_HOMING|STATE_HOLD|STATE_JOG|STATE_SAFETY_DOOR)) {
-        memcpy(rates, realtime_axis_rate, sizeof(realtime_axis_rate));
-    } else {
-        uint_fast8_t idx = N_AXIS;
-        do {
-            rates[--idx] = 0.0f;
-        } while(idx);
+    {
+        if(state_get() & (STATE_CYCLE|STATE_HOMING|STATE_HOLD|STATE_JOG|STATE_SAFETY_DOOR)) {
+            memcpy(rates, realtime_axis_rate, sizeof(realtime_axis_rate));
+        } else {
+            uint_fast8_t idx = N_AXIS;
+            do {
+                rates[--idx] = 0.0f;
+            } while(idx);
+        }
     }
+
+#if VELOCITY_AXES_ENABLE
+    velocity_axes_get_rates(rates);
+#endif
 }
 #endif
 

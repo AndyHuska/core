@@ -510,6 +510,12 @@ void stream_report_telnet_status (void);
 
 bool stream_await_tx_clear (const io_stream_t *stream);
 
+#if defined(CLIENT_SUPERVISION_ENABLE) && CLIENT_SUPERVISION_ENABLE
+void stream_client_supervision_rx (void);
+bool stream_client_supervision_poll (uint_fast16_t state);
+void stream_client_supervision_reset (void);
+#endif
+
 void stream_set_defaults (const io_stream_t *stream, uint32_t baud_rate);
 
 const io_stream_t *stream_get_base (void);
