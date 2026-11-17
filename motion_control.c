@@ -155,9 +155,10 @@ static bool blend_resolve_corner (float *target, plan_line_data_t *pl_data)
     float targets[3][N_AXIS];
     plan_line_data_t data[3];
     float normal[3], center[3];
-    memset(p1, 0, sizeof(p1));
-    memset(pmid, 0, sizeof(pmid));
-    memset(p2, 0, sizeof(p2));
+    // Non-XYZ axes are unchanged across the corner (blend_xyz_only), so hold them at b.
+    memcpy(p1, b, sizeof(p1));
+    memcpy(pmid, b, sizeof(pmid));
+    memcpy(p2, b, sizeof(p2));
 
     if(!blend_pending.valid || pl_data->path_tolerance <= 0.0f || pl_data->exact_stop ||
        !blend_xyz_only(a, b) || !blend_xyz_only(b, c))

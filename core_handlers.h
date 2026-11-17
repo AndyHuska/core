@@ -297,6 +297,7 @@ typedef struct {
     on_spindle_select_ptr on_spindle_select;                    //!< Called before spindle is selected, hook in HAL overrides here
     on_spindle_selected_ptr on_spindle_selected;                //!< Called when spindle is selected, do not change HAL pointers here!
     on_reset_ptr on_reset;                                      //!< Called from interrupt context.
+    on_reset_ptr on_soft_reset;                                 //!< Called from interrupt context when a soft reset command (Ctrl-X) is received, before on_reset.
     on_file_demarcate_ptr on_file_demarcate;                    //!< Called when percent sign is parsed in the gcode stream.
     on_file_open_ptr on_file_open;                              //!< Called when a file is opened for streaming.
     on_file_end_ptr on_file_end;                                //!< Called when a file opened for streaming reaches the end.

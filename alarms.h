@@ -49,7 +49,8 @@ typedef enum {
     Alarm_ModbusException = 19,                 //!< 19
     Alarm_ExpanderException = 20,               //!< 20
     Alarm_NVS_Failed = 21,                      //!< 21
-    Alarm_AlarmMax = Alarm_NVS_Failed
+    Alarm_ClientTimeout = 22,                   //!< 22
+    Alarm_AlarmMax = Alarm_ClientTimeout
 } __attribute__ ((__packed__)) alarm_code_t;
 
 typedef struct {

@@ -304,6 +304,7 @@ typedef struct output_command {
     uint8_t port;
     int32_t value;
     line_number_t execution_id;
+    bool (*exec)(struct output_command *cmd, bool cancel); //!< Optional: called instead of port output, returns true if applied.
     struct output_command *next;
 } output_command_t;
 
@@ -760,6 +761,8 @@ void gc_clear_offset (coord_system_id_t id);
 char *gc_coord_system_to_str (coord_system_id_t id);
 
 void gc_clear_output_commands (output_command_t *cmd);
+bool gc_queue_output_command (output_command_t *command);
+void gc_set_motion_dispatch_detail (const char *detail);
 
 spindle_t *gc_spindle_get (spindle_num_t spindle);
 
